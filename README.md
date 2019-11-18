@@ -1,2 +1,2 @@
-# Public-chain
-Token chain
+# UCOT chain
+Basic UxBFT
