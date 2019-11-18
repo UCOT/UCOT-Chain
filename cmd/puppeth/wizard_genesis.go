@@ -23,9 +23,11 @@ import (
 	"io/ioutil"
 	"math/big"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/dbft"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
@@ -39,19 +41,27 @@ func (w *wizard) makeGenesis() {
 		GasLimit:   4700000,
 		Difficulty: big.NewInt(524288),
 		Alloc:      make(core.GenesisAlloc),
+		// Config: &params.ChainConfig{
+		// 	HomesteadBlock: big.NewInt(1),
+		// 	EIP150Block:    big.NewInt(2),
+		// 	EIP155Block:    big.NewInt(3),
+		// 	EIP158Block:    big.NewInt(3),
+		// 	ByzantiumBlock: big.NewInt(4),
+		// },
 		Config: &params.ChainConfig{
-			HomesteadBlock: big.NewInt(1),
-			EIP150Block:    big.NewInt(2),
-			EIP155Block:    big.NewInt(3),
-			EIP158Block:    big.NewInt(3),
-			ByzantiumBlock: big.NewInt(4),
+			HomesteadBlock: big.NewInt(0),
+			EIP150Block:    big.NewInt(0),
+			EIP155Block:    big.NewInt(0),
+			EIP158Block:    big.NewInt(0),
+			ByzantiumBlock: big.NewInt(0),
 		},
 	}
 	// Figure out which consensus engine to choose
 	fmt.Println()
 	fmt.Println("Which consensus engine to use? (default = clique)")
-	fmt.Println(" 1. Hybrid PoS with Ethash - proof-of-work and proof-of-stake")
+	fmt.Println(" 1. Ethash - proof-of-work")
 	fmt.Println(" 2. Clique - proof-of-authority")
+	fmt.Println(" 3. Dbft   - Delegated BFT")
 
 	choice := w.read()
 	switch {
@@ -59,8 +69,6 @@ func (w *wizard) makeGenesis() {
 		// In case of ethash, we're pretty much done
 		genesis.Config.Ethash = new(params.EthashConfig)
 		genesis.ExtraData = make([]byte, 32)
-		genesis.CoinAge = make([]byte, 0, 23) //*** 1,050,000,000 -> 3648A260E3486A65A000000
-		genesis.CoinMined = make([]byte, 0, 22) //*** 210,000,000 -> ADB53ACFA41AEE12000000
 
 	case choice == "" || choice == "2":
 		// In the case of clique, configure the consensus parameters
@@ -100,36 +108,111 @@ func (w *wizard) makeGenesis() {
 			copy(genesis.ExtraData[32+i*common.AddressLength:], signer[:])
 		}
 
+	case choice == "3":
+		// In the case of DBFT, configure the consensus parameters
+		genesis.Difficulty = big.NewInt(1)
+		genesis.Config.Dbft = &params.DbftConfig{
+			Period: 10,
+			Epoch:  999999999,
+		}
+
+		var checkString string
+		fmt.Println()
+		fmt.Println("Do you want to set this chain as a test chain? (default = Yes)")
+		fmt.Println("Please type in y/n")
+		for {
+			checkString = w.readDefaultString("y")
+			if strings.ToLower(checkString) != "y" && strings.ToLower(checkString) != "n" {
+				fmt.Println("Unexpected input, please re-enter y/n")
+				continue
+			}
+			break
+		}
+		if checkString == "y" {
+			genesis.Config.Dbft.Test = true
+		} else {
+			genesis.Config.Dbft.Test = false
+		}
+		if genesis.Config.Dbft.Test {
+			fmt.Println()
+			fmt.Println("A test chain with DBFT is about to be activated.")
+			fmt.Println("Default Config:")
+			fmt.Println("blockPeriod = 30 seconds")
+			fmt.Println("epochLength = 50 blocks")
+			fmt.Println("gasLimit = 4700000")
+			fmt.Println("New block will be broadcasted after each node once receives ONE PreResp from another node")
+			fmt.Println("New View will be activated after each node once receives TWO ChangeView from other two nodes")
+			genesis.Config.Dbft.Period = uint64(0)
+			genesis.Config.Dbft.Epoch = uint64(0)
+		} else {
+			fmt.Println()
+			fmt.Println("How many seconds should blocks take? (default = 30 seconds)")
+			genesis.Config.Dbft.Period = uint64(w.readDefaultInt(30))
+
+			fmt.Println()
+			fmt.Println("How many blocks do you want to record missed signers and reset checkpoint? (default = 999999999 blocks, disable)")
+			genesis.Config.Dbft.Epoch = uint64(w.readDefaultInt(999999999))
+
+			fmt.Println()
+			fmt.Println("Please decide the amount of gasLimit (default = 4700000)")
+			genesis.GasLimit = uint64(w.readDefaultInt(4700000))
+		}
+
+		fmt.Println()
+		fmt.Println("The static list is being imported into the extra-data section")
+
+		var signers []common.Address
+		for _, addr := range dbft.AddressList() {
+			signers = append(signers, addr)
+		}
+		// Sort the signers and embed into the extra-data section
+		for i := 0; i < len(signers); i++ {
+			for j := i + 1; j < len(signers); j++ {
+				if bytes.Compare(signers[i][:], signers[j][:]) > 0 {
+					signers[i], signers[j] = signers[j], signers[i]
+				}
+			}
+		}
+		genesis.ExtraData = make([]byte, 32+len(signers)*common.AddressLength+65)
+		for i, signer := range signers {
+			copy(genesis.ExtraData[32+i*common.AddressLength:], signer[:])
+		}
+
 	default:
 		log.Crit("Invalid consensus engine choice", "choice", choice)
 	}
 	// Consensus all set, just ask for initial funds and go
 	fmt.Println()
-	fmt.Println("Which accounts should be pre-funded? (advisable at least one)")
-	if choice == "1" {
-		for {
-			// Read the address of the account to fund
-			if address := w.readAddress(); address != nil {
-				genesis.Alloc[*address] = core.GenesisAccount{
-					Balance: new(big.Int).Set(params.TotalAmountToken("10500000000000000000000000")), // 10,500,000 UBI
-				}
+	fmt.Println("Which accounts should be pre-funded? (all addresses in the static list as default)")
+	for {
+		// Read the address of the account to fund
+
+		address := w.readAddress()
+		if address != nil {
+			if !addrInSlice(*address, dbft.AddressList()) {
+				fmt.Println("The address is not contained in the signer list.")
 				continue
 			}
-			break
-		}
-	} else {
-		for {
-			// Read the address of the account to fund
-			if address := w.readAddress(); address != nil {
-				genesis.Alloc[*address] = core.GenesisAccount{
+			genesis.Alloc[*address] = core.GenesisAccount{
+				Balance: new(big.Int).Lsh(big.NewInt(1), 256-7), // 2^256 / 128 (allow many pre-funds without balance overflows)
+			}
+			continue
+		} else {
+			if len(genesis.Alloc) != 0 {
+				for addr, _ := range genesis.Alloc {
+					fmt.Println("addr", common.ToHex(addr[:]))
+				}
+				break
+			}
+			for _, addr := range dbft.AddressList() {
+				fmt.Println("addr", common.ToHex(addr[:]))
+				genesis.Alloc[addr] = core.GenesisAccount{
 					Balance: new(big.Int).Lsh(big.NewInt(1), 256-7), // 2^256 / 128 (allow many pre-funds without balance overflows)
 				}
-				continue
 			}
-			break
-		}	
+		}
+		break
 	}
-
 	// Add a batch of precompile balances to avoid them getting deleted
 	for i := int64(0); i < 256; i++ {
 		genesis.Alloc[common.BigToAddress(big.NewInt(i))] = core.GenesisAccount{Balance: big.NewInt(1)}
@@ -137,7 +220,7 @@ func (w *wizard) makeGenesis() {
 	// Query the user for some custom extras
 	fmt.Println()
 	fmt.Println("Specify your chain/network ID if you want an explicit one (default = random)")
-	genesis.Config.ChainID = new(big.Int).SetUint64(uint64(w.readDefaultInt(rand.Intn(65536))))
+	genesis.Config.ChainId = new(big.Int).SetUint64(uint64(w.readDefaultInt(rand.Intn(65536))))
 
 	// All done, store the genesis and flush to disk
 	log.Info("Configured new genesis block")
@@ -206,4 +289,13 @@ func (w *wizard) manageGenesis() {
 	default:
 		log.Error("That's not something I can do")
 	}
+}
+
+func addrInSlice(addr common.Address, signerList []common.Address) bool {
+	for _, v := range signerList {
+		if v == addr {
+			return true
+		}
+	}
+	return false
 }

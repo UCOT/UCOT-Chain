@@ -49,6 +49,9 @@ const (
 
 	// Maximum amount of time allowed for writing a complete message.
 	frameWriteTimeout = 20 * time.Second
+
+	// // Interval to send out the connected list for access control
+	// sendConnectedInterval = 300 * time.Second
 )
 
 var errServerStopped = errors.New("server stopped")
@@ -141,6 +144,12 @@ type Config struct {
 
 	// Logger is a custom logger to use with the p2p.Server.
 	Logger log.Logger `toml:",omitempty"`
+
+	// Need to be checked how this accessHash should be integrated with the access control protocol
+	AccessHash []byte
+
+	// AddressNodeMapping is the mapping between the addresses and nodeIDs in the context of P2P layer
+	AddressNodeMapping map[common.Address]string
 }
 
 // Server manages all peer connections.
@@ -175,6 +184,11 @@ type Server struct {
 	loopWG        sync.WaitGroup // loop, listenLoop
 	peerFeed      event.Feed
 	log           log.Logger
+
+	// EventMux      *event.TypeMux
+
+	// // Access control
+	// connectToLocal map[string]string
 }
 
 type peerOpFunc func(map[discover.NodeID]*Peer)
@@ -208,7 +222,8 @@ type conn struct {
 
 type transport interface {
 	// The two handshakes.
-	doEncHandshake(prv *ecdsa.PrivateKey, dialDest *discover.Node) (discover.NodeID, error)
+	// doEncHandshake(prv *ecdsa.PrivateKey, dialDest *discover.Node, accessHash []byte, connectToLocal map[string]string, path string) (discover.NodeID, error)
+	doEncHandshake(prv *ecdsa.PrivateKey, dialDest *discover.Node, accessHash []byte, path string) (discover.NodeID, error)
 	doProtoHandshake(our *protoHandshake) (*protoHandshake, error)
 	// The MsgReadWriter can only be used after the encryption
 	// handshake has completed. The code uses conn.id to track this
@@ -412,6 +427,9 @@ func (srv *Server) Start() (err error) {
 	srv.removestatic = make(chan *discover.Node)
 	srv.peerOp = make(chan peerOpFunc)
 	srv.peerOpDone = make(chan struct{})
+	// srv.connectToLocal = make(map[string]string) // initialize update table for access control
+
+	// go srv.EventMux.Post(AddressNodeMappingEvent{srv.Config.AddressNodeMapping})
 
 	var (
 		conn      *net.UDPConn
@@ -544,6 +562,7 @@ func (srv *Server) run(dialstate dialer) {
 		taskdone     = make(chan task, maxActiveDialTasks)
 		runningTasks []task
 		queuedTasks  []task // tasks that can't run yet
+		mutex        = &sync.Mutex{}
 	)
 	// Put trusted nodes into a map to speed up checks.
 	// Trusted peers are loaded on startup and cannot be
@@ -551,6 +570,21 @@ func (srv *Server) run(dialstate dialer) {
 	for _, n := range srv.TrustedNodes {
 		trusted[n.ID] = true
 	}
+
+	// // Send connectToLocal list every sendConnectedInterval for access control // Comment here if no ac
+	// go func() {
+	// 	for {
+	// 		select {
+	// 		case <-time.After(sendConnectedInterval):
+	// 			log.Trace("Update DB in p2p/server.go")
+	// 			mutex.Lock()
+	// 			updateServerDB(discover.PubkeyID(&srv.Config.PrivateKey.PublicKey), srv.connectToLocal, srv.Config.NodeDatabase)
+	// 			mutex.Unlock()
+	// 		case <-srv.quit:
+	// 			return
+	// 		}
+	// 	}
+	// }()
 
 	// removes t from runningTasks
 	delTask := func(t task) {
@@ -594,16 +628,18 @@ running:
 			// This channel is used by AddPeer to add to the
 			// ephemeral static peer list. Add it to the dialer,
 			// it will keep the node connected.
-			srv.log.Trace("Adding static node", "node", n)
+			srv.log.Debug("Adding static node", "node", n)
 			dialstate.addStatic(n)
 		case n := <-srv.removestatic:
 			// This channel is used by RemovePeer to send a
 			// disconnect request to a peer and begin the
 			// stop keeping the node connected
-			srv.log.Trace("Removing static node", "node", n)
+			srv.log.Debug("Removing static node", "node", n)
 			dialstate.removeStatic(n)
 			if p, ok := peers[n.ID]; ok {
+				mutex.Lock() // referring to close() in rlpx.go
 				p.Disconnect(DiscRequested)
+				mutex.Unlock()
 			}
 		case op := <-srv.peerOp:
 			// This channel is used by Peers and PeerCount.
@@ -679,7 +715,9 @@ running:
 	}
 	// Disconnect all peers.
 	for _, p := range peers {
+		mutex.Lock() // referring to close() in rlpx.go
 		p.Disconnect(DiscQuitting)
+		mutex.Unlock()
 	}
 	// Wait for peers to shut down. Pending connections and tasks are
 	// not handled here and will terminate soon-ish because srv.quit
@@ -816,7 +854,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node) e
 	}
 	// Run the encryption handshake.
 	var err error
-	if c.id, err = c.doEncHandshake(srv.PrivateKey, dialDest); err != nil {
+	if c.id, err = c.doEncHandshake(srv.PrivateKey, dialDest, srv.AccessHash, srv.Config.NodeDatabase); err != nil {
 		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
 		return err
 	}
@@ -849,7 +887,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node) e
 	}
 	// If the checks completed successfully, runPeer has now been
 	// launched by run.
-	clog.Trace("connection set up", "inbound", dialDest == nil)
+	clog.Trace("Connection set up", "inbound", dialDest == nil)
 	return nil
 }
 

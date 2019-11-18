@@ -78,6 +78,8 @@ type LightEthereum struct {
 	netRPCService *ethapi.PublicNetAPI
 
 	wg sync.WaitGroup
+
+	// instanceDbDataDir string // For api to fetch the instance datadir ***
 }
 
 func New(ctx *node.ServiceContext, config *eth.Config) (*LightEthereum, error) {
@@ -95,20 +97,21 @@ func New(ctx *node.ServiceContext, config *eth.Config) (*LightEthereum, error) {
 	quitSync := make(chan struct{})
 
 	leth := &LightEthereum{
-		config:           config,
-		chainConfig:      chainConfig,
-		chainDb:          chainDb,
-		eventMux:         ctx.EventMux,
-		peers:            peers,
-		reqDist:          newRequestDistributor(peers, quitSync),
-		accountManager:   ctx.AccountManager,
-		engine:           eth.CreateConsensusEngine(ctx, &config.Ethash, chainConfig, chainDb),
-		shutdownChan:     make(chan bool),
-		networkId:        config.NetworkId,
-		bloomRequests:    make(chan chan *bloombits.Retrieval),
-		bloomIndexer:     eth.NewBloomIndexer(chainDb, light.BloomTrieFrequency),
-		chtIndexer:       light.NewChtIndexer(chainDb, true),
-		bloomTrieIndexer: light.NewBloomTrieIndexer(chainDb, true),
+		config:            config,
+		chainConfig:       chainConfig,
+		chainDb:           chainDb,
+		eventMux:          ctx.EventMux,
+		peers:             peers,
+		reqDist:           newRequestDistributor(peers, quitSync),
+		accountManager:    ctx.AccountManager,
+		engine:            eth.CreateConsensusEngine(ctx, &config.Ethash, chainConfig, chainDb, true),
+		shutdownChan:      make(chan bool),
+		networkId:         config.NetworkId,
+		bloomRequests:     make(chan chan *bloombits.Retrieval),
+		bloomIndexer:      eth.NewBloomIndexer(chainDb, light.BloomTrieFrequency),
+		chtIndexer:        light.NewChtIndexer(chainDb, true),
+		bloomTrieIndexer:  light.NewBloomTrieIndexer(chainDb, true),
+		// instanceDbDataDir: ctx.GetConfig().DataDir, // ***
 	}
 
 	leth.relay = NewLesTxRelay(peers, leth.reqDist)
@@ -127,7 +130,7 @@ func New(ctx *node.ServiceContext, config *eth.Config) (*LightEthereum, error) {
 	}
 
 	leth.txPool = light.NewTxPool(leth.chainConfig, leth.blockchain, leth.relay)
-	if leth.protocolManager, err = NewProtocolManager(leth.chainConfig, true, ClientProtocolVersions, config.NetworkId, leth.eventMux, leth.engine, leth.peers, leth.blockchain, nil, chainDb, leth.odr, leth.relay, leth.serverPool, quitSync, &leth.wg); err != nil {
+	if leth.protocolManager, err = NewProtocolManager(leth.chainConfig, true, ClientProtocolVersions, config.NetworkId, leth.eventMux, leth.engine, leth.peers, leth.blockchain, nil, chainDb, leth.odr, leth.relay, quitSync, &leth.wg); err != nil {
 		return nil, err
 	}
 	leth.ApiBackend = &LesApiBackend{leth, nil}
@@ -212,6 +215,8 @@ func (s *LightEthereum) Engine() consensus.Engine           { return s.engine }
 func (s *LightEthereum) LesVersion() int                    { return int(s.protocolManager.SubProtocols[0].Version) }
 func (s *LightEthereum) Downloader() *downloader.Downloader { return s.protocolManager.downloader }
 func (s *LightEthereum) EventMux() *event.TypeMux           { return s.eventMux }
+
+// func (s *LightEthereum) InstanceDbDataDir() string { return s.instanceDbDataDir } // ***
 
 // Protocols implements node.Service, returning all the currently configured
 // network protocols to start.

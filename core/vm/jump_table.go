@@ -33,7 +33,7 @@ type (
 var errGasUintOverflow = errors.New("gas uint64 overflow")
 
 type operation struct {
-	// execute is the operation function
+	// op is the operation function
 	execute executionFunc
 	// gasCost is the gas function and returns the gas required for execution
 	gasCost gasFunc
@@ -51,17 +51,17 @@ type operation struct {
 }
 
 var (
-	frontierInstructionSet       = newFrontierInstructionSet()
-	homesteadInstructionSet      = newHomesteadInstructionSet()
-	byzantiumInstructionSet      = newByzantiumInstructionSet()
-	constantinopleInstructionSet = newConstantinopleInstructionSet()
+	frontierInstructionSet       = NewFrontierInstructionSet()
+	homesteadInstructionSet      = NewHomesteadInstructionSet()
+	byzantiumInstructionSet      = NewByzantiumInstructionSet()
+	constantinopleInstructionSet = NewConstantinopleInstructionSet()
 )
 
 // NewConstantinopleInstructionSet returns the frontier, homestead
 // byzantium and contantinople instructions.
-func newConstantinopleInstructionSet() [256]operation {
+func NewConstantinopleInstructionSet() [256]operation {
 	// instructions that can be executed during the byzantium phase.
-	instructionSet := newByzantiumInstructionSet()
+	instructionSet := NewByzantiumInstructionSet()
 	instructionSet[SHL] = operation{
 		execute:       opSHL,
 		gasCost:       constGasFunc(GasFastestStep),
@@ -85,9 +85,9 @@ func newConstantinopleInstructionSet() [256]operation {
 
 // NewByzantiumInstructionSet returns the frontier, homestead and
 // byzantium instructions.
-func newByzantiumInstructionSet() [256]operation {
+func NewByzantiumInstructionSet() [256]operation {
 	// instructions that can be executed during the homestead phase.
-	instructionSet := newHomesteadInstructionSet()
+	instructionSet := NewHomesteadInstructionSet()
 	instructionSet[STATICCALL] = operation{
 		execute:       opStaticCall,
 		gasCost:       gasStaticCall,
@@ -123,8 +123,8 @@ func newByzantiumInstructionSet() [256]operation {
 
 // NewHomesteadInstructionSet returns the frontier and homestead
 // instructions that can be executed during the homestead phase.
-func newHomesteadInstructionSet() [256]operation {
-	instructionSet := newFrontierInstructionSet()
+func NewHomesteadInstructionSet() [256]operation {
+	instructionSet := NewFrontierInstructionSet()
 	instructionSet[DELEGATECALL] = operation{
 		execute:       opDelegateCall,
 		gasCost:       gasDelegateCall,
@@ -138,7 +138,7 @@ func newHomesteadInstructionSet() [256]operation {
 
 // NewFrontierInstructionSet returns the frontier instructions
 // that can be executed during the frontier phase.
-func newFrontierInstructionSet() [256]operation {
+func NewFrontierInstructionSet() [256]operation {
 	return [256]operation{
 		STOP: {
 			execute:       opStop,

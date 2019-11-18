@@ -177,7 +177,13 @@ func parseComplete(rawurl string) (*Node, error) {
 		return nil, fmt.Errorf("invalid host: %v", err)
 	}
 	if ip = net.ParseIP(host); ip == nil {
-		return nil, errors.New("invalid IP address")
+		// Attempt to look up IP addresses
+		lookupIPs, err := net.LookupIP(host)
+		if err != nil {
+			return nil, errors.New("invalid IP address")
+		}
+		// set to first ip by default
+		ip = lookupIPs[0]
 	}
 	// Ensure the IP is 4 bytes long for IPv4 addresses.
 	if ipv4 := ip.To4(); ipv4 != nil {
@@ -228,6 +234,14 @@ type NodeID [NodeIDBits / 8]byte
 // Bytes returns a byte slice representation of the NodeID
 func (n NodeID) Bytes() []byte {
 	return n[:]
+}
+
+func (n NodeID) SetBytes(b []byte) {
+	if len(b) > len(n) {
+		b = b[len(b)-(NodeIDBits/8):]
+	}
+
+	copy(n[(NodeIDBits/8)-len(b):], b)
 }
 
 // NodeID prints as a long hexadecimal number.

@@ -19,7 +19,7 @@ package abi
 import (
 	"bytes"
 	"math/big"
-
+	"reflect"
 	"testing"
 )
 
@@ -33,13 +33,12 @@ func TestNumberTypes(t *testing.T) {
 	}
 }
 
+func TestSigned(t *testing.T) {
+	if isSigned(reflect.ValueOf(uint(10))) {
+		t.Error("signed")
+	}
 
-
-
-
-
-
-
-
-
-
+	if !isSigned(reflect.ValueOf(int(10))) {
+		t.Error("not signed")
+	}
+}

@@ -1,0 +1,23 @@
+# Build Geth in a stock Go builder container
+FROM golang:1.10-alpine as builder
+
+RUN apk add --no-cache make gcc musl-dev linux-headers
+
+ADD . /go-ethereum
+RUN cd /go-ethereum && make all
+
+
+FROM alpine:latest
+
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /go-ethereum/build/bin/geth /usr/local/bin/
+COPY --from=builder /go-ethereum/build/bin/bootnode /usr/local/bin/
+
+COPY --from=builder /go-ethereum/settings/uxchain_test_1.json /ucot_iot/settings/uxchain_test_1.json
+RUN rm -f /ucot_iot/data/keystore/.DS_Store
+RUN geth --datadir /ucot_iot/data init /ucot_iot/settings/uxchain_test_1.json
+
+CMD geth --datadir /ucot_iot/data init /ucot_iot/settings/uxchain_test_1.json && \
+	bootnode -genkey "/ucot_iot/data/geth/nodekey" && \
+	cat /ucot_iot/data/geth/nodekey && \
+	bootnode -nodekeyhex $(cat /ucot_iot/data/geth/nodekey) -writeaddress

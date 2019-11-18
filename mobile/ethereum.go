@@ -125,12 +125,12 @@ func (t *Topics) Append(topics *Hashes) {
 	t.topics = append(t.topics, topics.hashes)
 }
 
-// FilterQuery contains options for contract log filtering.
+// FilterQuery contains options for contact log filtering.
 type FilterQuery struct {
 	query ethereum.FilterQuery
 }
 
-// NewFilterQuery creates an empty filter query for contract log filtering.
+// NewFilterQuery creates an empty filter query for contact log filtering.
 func NewFilterQuery() *FilterQuery {
 	return new(FilterQuery)
 }
@@ -144,4 +144,3 @@ func (fq *FilterQuery) SetFromBlock(fromBlock *BigInt)    { fq.query.FromBlock =
 func (fq *FilterQuery) SetToBlock(toBlock *BigInt)        { fq.query.ToBlock = toBlock.bigint }
 func (fq *FilterQuery) SetAddresses(addresses *Addresses) { fq.query.Addresses = addresses.addresses }
 func (fq *FilterQuery) SetTopics(topics *Topics)          { fq.query.Topics = topics.topics }
-

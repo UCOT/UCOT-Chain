@@ -15,9 +15,6 @@
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
 // Package downloader contains the manual full chain synchronisation.
-
-// *** denotes the UCOT dedicated code
-
 package downloader
 
 import (
@@ -67,9 +64,7 @@ var (
 	fsHeaderSafetyNet      = 2048            // Number of headers to discard in case a chain violation is detected
 	fsHeaderForceVerify    = 24              // Number of headers to verify before and after the pivot to accept it
 	fsHeaderContCheck      = 3 * time.Second // Time interval to check for header continuations during state download
-	// fsMinFullBlocks        = 64           // Number of blocks to retrieve fully even in fast sync
-	fsMinFullBlocks        = 1024 /*+5-1*/           // Number of blocks to retrieve fully even in fast sync
-	// fsMinFullBlocks = 100000 // For testing
+	fsMinFullBlocks        = 64              // Number of blocks to retrieve fully even in fast sync
 )
 
 var (
@@ -658,7 +653,6 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 			// Check if a common ancestor was found
 			finished = true
 			for i := len(headers) - 1; i >= 0; i-- {
-				// log.Trace("check headers","size",len(headers))
 				// Skip any headers that underflow/overflow our requested set
 				if headers[i].Number.Int64() < from || headers[i].Number.Uint64() > ceil {
 					continue
@@ -666,7 +660,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 				// Otherwise check if we already know the header or not
 				if (d.mode == FullSync && d.blockchain.HasBlock(headers[i].Hash(), headers[i].Number.Uint64())) || (d.mode != FullSync && d.lightchain.HasHeader(headers[i].Hash(), headers[i].Number.Uint64())) {
 					number, hash = headers[i].Number.Uint64(), headers[i].Hash()
-					// log.Trace("do we found it?","numer",number,"hash",hash)
+
 					// If every header is known, even future ones, the peer straight out lied about its head
 					if number > height && i == limit-1 {
 						p.log.Warn("Lied about chain head", "reported", height, "found", number)
@@ -686,7 +680,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 		}
 	}
 	// If the head fetch already found an ancestor, return
-	if hash != (common.Hash{}) {
+	if !common.EmptyHash(hash) {
 		if int64(number) <= floor {
 			p.log.Warn("Ancestor below allowance", "number", number, "hash", hash, "allowance", floor)
 			return 0, errInvalidAncestor
@@ -906,7 +900,7 @@ func (d *Downloader) fillHeaderSkeleton(from uint64, skeleton []*types.Header) (
 	var (
 		deliver = func(packet dataPack) (int, error) {
 			pack := packet.(*headerPack)
-			return d.queue.DeliverHeaders(pack.peerID, pack.headers, d.headerProcCh)
+			return d.queue.DeliverHeaders(pack.peerId, pack.headers, d.headerProcCh)
 		}
 		expire   = func() map[string]int { return d.queue.ExpireHeaders(d.requestTTL()) }
 		throttle = func() bool { return false }
@@ -936,7 +930,7 @@ func (d *Downloader) fetchBodies(from uint64) error {
 	var (
 		deliver = func(packet dataPack) (int, error) {
 			pack := packet.(*bodyPack)
-			return d.queue.DeliverBodies(pack.peerID, pack.transactions, pack.uncles)
+			return d.queue.DeliverBodies(pack.peerId, pack.transactions, pack.uncles, pack.groupSig)
 		}
 		expire   = func() map[string]int { return d.queue.ExpireBodies(d.requestTTL()) }
 		fetch    = func(p *peerConnection, req *fetchRequest) error { return p.FetchBodies(req) }
@@ -960,7 +954,7 @@ func (d *Downloader) fetchReceipts(from uint64) error {
 	var (
 		deliver = func(packet dataPack) (int, error) {
 			pack := packet.(*receiptPack)
-			return d.queue.DeliverReceipts(pack.peerID, pack.receipts)
+			return d.queue.DeliverReceipts(pack.peerId, pack.receipts)
 		}
 		expire   = func() map[string]int { return d.queue.ExpireReceipts(d.requestTTL()) }
 		fetch    = func(p *peerConnection, req *fetchRequest) error { return p.FetchReceipts(req) }
@@ -1273,7 +1267,7 @@ func (d *Downloader) processHeaders(origin uint64, pivot uint64, td *big.Int) er
 					// If we're importing pure headers, verify based on their recentness
 					frequency := fsHeaderCheckFrequency
 					if chunk[len(chunk)-1].Number.Uint64()+uint64(fsHeaderForceVerify) > pivot {
-						frequency = 100 // make freq = 100 instead of 1 *** 
+						frequency = 1
 					}
 					if n, err := d.lightchain.InsertHeaderChain(chunk, frequency); err != nil {
 						// If some headers were inserted, add them too to the rollback list
@@ -1338,18 +1332,17 @@ func (d *Downloader) processFullSyncContent() error {
 		if d.chainInsertHook != nil {
 			d.chainInsertHook(results)
 		}
-		if err := d.importBlockResults(0, results); err != nil {
+		if err := d.importBlockResults(results); err != nil {
 			return err
 		}
 	}
 }
 
-func (d *Downloader) importBlockResults(pivot uint64, results []*fetchResult) error {
+func (d *Downloader) importBlockResults(results []*fetchResult) error {
 	// Check for any early termination requests
 	if len(results) == 0 {
 		return nil
 	}
-	// log.Trace("Now we need to check the size of result","result",len(results), "pivot", pivot, "firstnum", results[0].Header.Number,"lastnum", results[len(results)-1].Header.Number)
 	select {
 	case <-d.quitCh:
 		return errCancelContentProcessing
@@ -1363,11 +1356,7 @@ func (d *Downloader) importBlockResults(pivot uint64, results []*fetchResult) er
 	)
 	blocks := make([]*types.Block, len(results))
 	for i, result := range results {
-		blocks[i] = types.NewBlockWithHeader(result.Header).WithBody(result.Transactions, result.Uncles)
-		// Set the flag NoValidateCoinAge. The condition is restricted by miningLogAtDepth ***
-		if pivot > 0 && result.Header.Number.Uint64() - pivot < uint64(fsMinFullBlocks)/2+5-1 {
-			blocks[i].NoValidateCoinAge = true
-		}
+		blocks[i] = types.NewBlockWithHeader(result.Header).WithBody(result.Transactions, result.Uncles, result.GroupSig)
 	}
 	if index, err := d.blockchain.InsertChain(blocks); err != nil {
 		log.Debug("Downloaded item processing failed", "number", results[index].Header.Number, "hash", results[index].Header.Hash(), "err", err)
@@ -1430,7 +1419,6 @@ func (d *Downloader) processFastSyncContent(latest *types.Header) error {
 				pivot = height - uint64(fsMinFullBlocks)
 			}
 		}
-		log.Info("check pivot","pivot",pivot, "latest", latest.Number.Uint64())
 		P, beforeP, afterP := splitAroundPivot(pivot, results)
 		if err := d.commitFastSyncData(beforeP, stateSync); err != nil {
 			return err
@@ -1466,7 +1454,7 @@ func (d *Downloader) processFastSyncContent(latest *types.Header) error {
 			}
 		}
 		// Fast sync done, pivot commit done, full import
-		if err := d.importBlockResults(pivot, afterP); err != nil {
+		if err := d.importBlockResults(afterP); err != nil {
 			return err
 		}
 	}
@@ -1510,7 +1498,7 @@ func (d *Downloader) commitFastSyncData(results []*fetchResult, stateSync *state
 	blocks := make([]*types.Block, len(results))
 	receipts := make([]types.Receipts, len(results))
 	for i, result := range results {
-		blocks[i] = types.NewBlockWithHeader(result.Header).WithBody(result.Transactions, result.Uncles)
+		blocks[i] = types.NewBlockWithHeader(result.Header).WithBody(result.Transactions, result.Uncles, result.GroupSig)
 		receipts[i] = result.Receipts
 	}
 	if index, err := d.blockchain.InsertReceiptChain(blocks, receipts); err != nil {
@@ -1521,7 +1509,7 @@ func (d *Downloader) commitFastSyncData(results []*fetchResult, stateSync *state
 }
 
 func (d *Downloader) commitPivotBlock(result *fetchResult) error {
-	block := types.NewBlockWithHeader(result.Header).WithBody(result.Transactions, result.Uncles)
+	block := types.NewBlockWithHeader(result.Header).WithBody(result.Transactions, result.Uncles, result.GroupSig)
 	log.Debug("Committing fast sync pivot as new head", "number", block.Number(), "hash", block.Hash())
 	if _, err := d.blockchain.InsertReceiptChain([]*types.Block{block}, []types.Receipts{result.Receipts}); err != nil {
 		return err
@@ -1540,8 +1528,8 @@ func (d *Downloader) DeliverHeaders(id string, headers []*types.Header) (err err
 }
 
 // DeliverBodies injects a new batch of block bodies received from a remote node.
-func (d *Downloader) DeliverBodies(id string, transactions [][]*types.Transaction, uncles [][]*types.Header) (err error) {
-	return d.deliver(id, d.bodyCh, &bodyPack{id, transactions, uncles}, bodyInMeter, bodyDropMeter)
+func (d *Downloader) DeliverBodies(id string, transactions [][]*types.Transaction, uncles [][]*types.Header, groupSig [][]*types.GroupSignature) (err error) {
+	return d.deliver(id, d.bodyCh, &bodyPack{id, transactions, uncles, groupSig}, bodyInMeter, bodyDropMeter)
 }
 
 // DeliverReceipts injects a new batch of receipts received from a remote node.

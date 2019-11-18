@@ -21,6 +21,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/consensus/dbft"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 )
@@ -39,10 +40,14 @@ type ChainContext interface {
 func NewEVMContext(msg Message, header *types.Header, chain ChainContext, author *common.Address) vm.Context {
 	// If we don't have an explicit author (i.e. not mining), extract from the header
 	var beneficiary common.Address
-	if author == nil {
-		beneficiary, _ = chain.Engine().Author(header) // Ignore error, we're past header validation
+	if _, ok := chain.Engine().(*dbft.Dbft); ok {
+		beneficiary = header.Coinbase
 	} else {
-		beneficiary = *author
+		if author == nil {
+			beneficiary, _ = chain.Engine().Author(header) // Ignore error, we're past header validation
+		} else {
+			beneficiary = *author
+		}
 	}
 	return vm.Context{
 		CanTransfer: CanTransfer,

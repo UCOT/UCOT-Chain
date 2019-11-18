@@ -19,15 +19,14 @@ package params
 import "math/big"
 
 var (
-	TargetGasLimit = GenesisGasLimit // The artificial target
+	TargetGasLimit uint64 = GenesisGasLimit // The artificial target
 )
 
 const (
-	MaximumBalanceSize   uint64 = 25    // Maximum size balance may be after Genesis. //*** 0xD92289838D21A996800000000
-
-	GasLimitBoundDivisor uint64 = 1024    // The bound divisor of the gas limit, used in update calculations.
-	MinGasLimit          uint64 = 5000    // Minimum the gas limit may ever be.
-	GenesisGasLimit      uint64 = 4712388 // Gas limit of the Genesis block.
+	GasLimitBoundDivisor uint64 = 1024 // The bound divisor of the gas limit, used in update calculations.
+	MinGasLimit          uint64 = 5000 // Minimum the gas limit may ever be.
+	// GenesisGasLimit      uint64 = 4712388 // Gas limit of the Genesis block.
+	GenesisGasLimit uint64 = 440000000 // Gas limit of the Genesis block.
 
 	MaximumExtraDataSize  uint64 = 32    // Maximum size extra data may be after Genesis.
 	ExpByteGas            uint64 = 10    // Times ceil(log256(exponent)) for the EXP instruction.
@@ -79,6 +78,10 @@ const (
 	Bn256ScalarMulGas       uint64 = 40000  // Gas needed for an elliptic curve scalar multiplication
 	Bn256PairingBaseGas     uint64 = 100000 // Base price for an elliptic curve pairing check
 	Bn256PairingPerPointGas uint64 = 80000  // Per-point price for an elliptic curve pairing check
+
+	// DBFT Parameters
+	MinMinersAllowed        uint64 = 4      // The minimum number of miners allowed
+	MaxMinersAllowed        uint64 = 11     // The maximum number of miners allowed
 )
 
 var (
@@ -87,4 +90,3 @@ var (
 	MinimumDifficulty      = big.NewInt(131072) // The minimum that the difficulty may ever be.
 	DurationLimit          = big.NewInt(13)     // The decision boundary on the blocktime duration used to determine whether difficulty should go up or not.
 )
-

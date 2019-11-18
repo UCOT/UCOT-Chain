@@ -17,7 +17,6 @@
 package p2p
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -25,15 +24,12 @@ import (
 	"sync"
 	"time"
 
+	// "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/rlp"
-)
-
-var (
-	ErrShuttingDown = errors.New("shutting down")
 )
 
 const (
@@ -97,6 +93,9 @@ type PeerEvent struct {
 	MsgCode  *uint64         `json:"msg_code,omitempty"`
 	MsgSize  *uint32         `json:"msg_size,omitempty"`
 }
+// // AddressNodeMappingEvent is an event emitted to store the mapping between
+// // addresses and nodeID
+// type AddressNodeMappingEvent struct{ addr_node_map map[common.Address]string }
 
 // Peer represents a connected remote node.
 type Peer struct {
@@ -391,14 +390,14 @@ func (rw *protoRW) WriteMsg(msg Msg) (err error) {
 	msg.Code += rw.offset
 	select {
 	case <-rw.wstart:
-		err = rw.w.WriteMsg(msg)
+		err = rw.w.WriteMsg(msg) //rlpx
 		// Report write status back to Peer.run. It will initiate
 		// shutdown if the error is non-nil and unblock the next write
 		// otherwise. The calling protocol code should exit for errors
 		// as well but we don't want to rely on that.
 		rw.werr <- err
 	case <-rw.closed:
-		err = ErrShuttingDown
+		err = fmt.Errorf("shutting down")
 	}
 	return err
 }
@@ -464,4 +463,3 @@ func (p *Peer) Info() *PeerInfo {
 	}
 	return info
 }
-

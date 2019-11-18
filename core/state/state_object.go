@@ -219,14 +219,14 @@ func (self *stateObject) updateRoot(db Database) {
 	self.data.Root = self.trie.Hash()
 }
 
-// CommitTrie the storage trie of the object to db.
+// CommitTrie the storage trie of the object to dwb.
 // This updates the trie root.
 func (self *stateObject) CommitTrie(db Database) error {
 	self.updateTrie(db)
 	if self.dbErr != nil {
 		return self.dbErr
 	}
-	root, err := self.trie.Commit(nil) // core/state/database.go
+	root, err := self.trie.Commit(nil)
 	if err == nil {
 		self.data.Root = root
 	}

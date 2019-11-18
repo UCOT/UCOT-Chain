@@ -51,8 +51,11 @@ const (
 	sigLen = 65 // elliptic S256
 	pubLen = 64 // 512 bit pubkey in uncompressed representation without format byte
 	shaLen = 32 // hash length (for nonce etc)
+	// md5Len = 16
 
-	authMsgLen  = sigLen + shaLen + pubLen + shaLen + 1
+	// authMsgLen  = sigLen + shaLen + pubLen + shaLen + 1
+	// authMsgLen  = sigLen + shaLen + pubLen + shaLen + md5Len*2 + 1
+	authMsgLen  = sigLen + shaLen + pubLen + shaLen + shaLen + 1
 	authRespLen = pubLen + shaLen + 1
 
 	eciesOverhead = 65 /* pubkey */ + 16 /* IV */ + 32 /* MAC */
@@ -81,6 +84,8 @@ type rlpx struct {
 
 	rmu, wmu sync.Mutex
 	rw       *rlpxFrameRW
+
+	// connected map[string]string // local update list for incoming connection
 }
 
 func newRLPX(fd net.Conn) transport {
@@ -103,8 +108,16 @@ func (t *rlpx) WriteMsg(msg Msg) error {
 }
 
 func (t *rlpx) close(err error) {
+	// t.rmu.Lock()
+	// addr := t.fd.RemoteAddr().String()
+	// defer t.rmu.Unlock()
+	// Update the ID server
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
+	// if _, ok := t.connected[addr]; ok { // deleting
+	// 	// discRequest(t.fd.RemoteAddr().String())
+	// 	delete(t.connected, addr)
+	// }
 	// Tell the remote end why we're disconnecting if possible.
 	if t.rw != nil {
 		if r, ok := err.(DiscReason); ok && r != DiscNetworkError {
@@ -175,15 +188,20 @@ func readProtocolHandshake(rw MsgReader, our *protoHandshake) (*protoHandshake, 
 // messages. the protocol handshake is the first authenticated message
 // and also verifies whether the encryption handshake 'worked' and the
 // remote side actually provided the right public key.
-func (t *rlpx) doEncHandshake(prv *ecdsa.PrivateKey, dial *discover.Node) (discover.NodeID, error) {
+func (t *rlpx) doEncHandshake(prv *ecdsa.PrivateKey, dial *discover.Node, accessHash []byte, path string) (discover.NodeID, error) {
 	var (
 		sec secrets
 		err error
 	)
+	// t.wmu.Lock()
+	// t.connected = connectToLocal
+	// t.wmu.Unlock()
 	if dial == nil {
-		sec, err = receiverEncHandshake(t.fd, prv, nil)
+		t.wmu.Lock()
+		sec, err = receiverEncHandshake(t.fd, path, prv, nil)
+		t.wmu.Unlock()
 	} else {
-		sec, err = initiatorEncHandshake(t.fd, prv, dial.ID, nil)
+		sec, err = initiatorEncHandshake(t.fd, prv, dial.ID, nil, accessHash)
 	}
 	if err != nil {
 		return discover.NodeID{}, err
@@ -222,6 +240,8 @@ type authMsgV4 struct {
 	InitiatorPubkey [pubLen]byte
 	Nonce           [shaLen]byte
 	Version         uint
+
+	RandomAccessHash [shaLen]byte
 
 	// Ignore additional fields (forward-compatibility)
 	Rest []rlp.RawValue `rlp:"tail"`
@@ -280,9 +300,9 @@ func (h *encHandshake) staticSharedSecret(prv *ecdsa.PrivateKey) ([]byte, error)
 // it should be called on the dialing side of the connection.
 //
 // prv is the local client's private key.
-func initiatorEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey, remoteID discover.NodeID, token []byte) (s secrets, err error) {
+func initiatorEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey, remoteID discover.NodeID, token []byte, accessHash []byte) (s secrets, err error) {
 	h := &encHandshake{initiator: true, remoteID: remoteID}
-	authMsg, err := h.makeAuthMsg(prv, token)
+	authMsg, err := h.makeAuthMsg(prv, token, accessHash)
 	if err != nil {
 		return s, err
 	}
@@ -306,7 +326,7 @@ func initiatorEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey, remoteID d
 }
 
 // makeAuthMsg creates the initiator handshake message.
-func (h *encHandshake) makeAuthMsg(prv *ecdsa.PrivateKey, token []byte) (*authMsgV4, error) {
+func (h *encHandshake) makeAuthMsg(prv *ecdsa.PrivateKey, token []byte, accessHash []byte) (*authMsgV4, error) {
 	rpub, err := h.remoteID.Pubkey()
 	if err != nil {
 		return nil, fmt.Errorf("bad remoteID: %v", err)
@@ -339,6 +359,7 @@ func (h *encHandshake) makeAuthMsg(prv *ecdsa.PrivateKey, token []byte) (*authMs
 	copy(msg.InitiatorPubkey[:], crypto.FromECDSAPub(&prv.PublicKey)[1:])
 	copy(msg.Nonce[:], h.initNonce)
 	msg.Version = 4
+	copy(msg.RandomAccessHash[:], accessHash)
 	return msg, nil
 }
 
@@ -353,14 +374,14 @@ func (h *encHandshake) handleAuthResp(msg *authRespV4) (err error) {
 //
 // prv is the local client's private key.
 // token is the token from a previous session with this node.
-func receiverEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey, token []byte) (s secrets, err error) {
+func receiverEncHandshake(conn net.Conn, path string, prv *ecdsa.PrivateKey, token []byte) (s secrets, err error) {
 	authMsg := new(authMsgV4)
 	authPacket, err := readHandshakeMsg(authMsg, encAuthMsgLen, prv, conn)
 	if err != nil {
 		return s, err
 	}
 	h := new(encHandshake)
-	if err := h.handleAuthMsg(authMsg, prv); err != nil {
+	if err := h.handleAuthMsg(authMsg, prv, path); err != nil {
 		return s, err
 	}
 
@@ -380,10 +401,12 @@ func receiverEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey, token []byt
 	if _, err = conn.Write(authRespPacket); err != nil {
 		return s, err
 	}
+
+	// connectToLocal[conn.RemoteAddr().String()] = common.ToHex(h.remoteID[:]) // map[IP]ID
 	return h.secrets(authPacket, authRespPacket)
 }
 
-func (h *encHandshake) handleAuthMsg(msg *authMsgV4, prv *ecdsa.PrivateKey) error {
+func (h *encHandshake) handleAuthMsg(msg *authMsgV4, prv *ecdsa.PrivateKey, path string) error {
 	// Import the remote identity.
 	h.initNonce = msg.Nonce[:]
 	h.remoteID = msg.InitiatorPubkey
@@ -392,6 +415,19 @@ func (h *encHandshake) handleAuthMsg(msg *authMsgV4, prv *ecdsa.PrivateKey) erro
 		return fmt.Errorf("bad remoteID: %#v", err)
 	}
 	h.remotePub = ecies.ImportECDSAPublic(rpub)
+
+	// // Send Request to Identity Server for checking the RandomAccessHash // Comment here if no ac
+	// fmt.Println()
+	// fmt.Println("check accesshash at listener: ", common.ToHex(msg.RandomAccessHash[:]))
+	// fmt.Println("check the child path of conf file: ", path)
+	// // nodeID := discover.PubkeyID(&prv.PublicKey)
+	// if allowed, err := getAccess(msg.RandomAccessHash[:], path); !allowed {
+	// 	fmt.Println("GET ACCESS", allowed, err)
+	// 	return err
+	// } else {
+	// 	fmt.Println("pass!", allowed)
+	// }
+
 
 	// Generate random keypair for ECDH.
 	// If a private key is already set, use it instead of generating one (for testing).
@@ -436,6 +472,7 @@ func (msg *authMsgV4) sealPlain(h *encHandshake) ([]byte, error) {
 	n += copy(buf[n:], crypto.Keccak256(exportPubkey(&h.randomPrivKey.PublicKey)))
 	n += copy(buf[n:], msg.InitiatorPubkey[:])
 	n += copy(buf[n:], msg.Nonce[:])
+	n += copy(buf[n:], msg.RandomAccessHash[:])
 	buf[n] = 0 // token-flag
 	return ecies.Encrypt(rand.Reader, h.remotePub, buf, nil, nil)
 }
@@ -444,7 +481,8 @@ func (msg *authMsgV4) decodePlain(input []byte) {
 	n := copy(msg.Signature[:], input)
 	n += shaLen // skip sha3(initiator-ephemeral-pubk)
 	n += copy(msg.InitiatorPubkey[:], input[n:])
-	copy(msg.Nonce[:], input[n:])
+	n += copy(msg.Nonce[:], input[n:])
+	copy(msg.RandomAccessHash[:], input[n:])
 	msg.Version = 4
 	msg.gotPlain = true
 }
@@ -528,9 +566,9 @@ func importPublicKey(pubKey []byte) (*ecies.PublicKey, error) {
 		return nil, fmt.Errorf("invalid public key length %v (expect 64/65)", len(pubKey))
 	}
 	// TODO: fewer pointless conversions
-	pub, err := crypto.UnmarshalPubkey(pubKey65)
-	if err != nil {
-		return nil, err
+	pub := crypto.ToECDSAPub(pubKey65)
+	if pub.X == nil {
+		return nil, fmt.Errorf("invalid public key")
 	}
 	return ecies.ImportECDSAPublic(pub), nil
 }

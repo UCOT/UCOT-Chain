@@ -217,4 +217,3 @@ func (n *Node) GetNodeInfo() *NodeInfo {
 func (n *Node) GetPeersInfo() *PeerInfos {
 	return &PeerInfos{n.node.Server().PeersInfo()}
 }
-

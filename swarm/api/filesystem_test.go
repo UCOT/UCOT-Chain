@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,9 +30,9 @@ import (
 
 var testDownloadDir, _ = ioutil.TempDir(os.TempDir(), "bzz-test")
 
-func testFileSystem(t *testing.T, f func(*FileSystem, bool)) {
-	testAPI(t, func(api *API, toEncrypt bool) {
-		f(NewFileSystem(api), toEncrypt)
+func testFileSystem(t *testing.T, f func(*FileSystem)) {
+	testApi(t, func(api *Api) {
+		f(NewFileSystem(api))
 	})
 }
 
@@ -46,9 +47,9 @@ func readPath(t *testing.T, parts ...string) string {
 }
 
 func TestApiDirUpload0(t *testing.T) {
-	testFileSystem(t, func(fs *FileSystem, toEncrypt bool) {
+	testFileSystem(t, func(fs *FileSystem) {
 		api := fs.api
-		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0"), "", toEncrypt)
+		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0"), "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -62,8 +63,8 @@ func TestApiDirUpload0(t *testing.T) {
 		exp = expResponse(content, "text/css", 0)
 		checkResponse(t, resp, exp)
 
-		addr := storage.Address(common.Hex2Bytes(bzzhash))
-		_, _, _, _, err = api.Get(addr, "")
+		key := storage.Key(common.Hex2Bytes(bzzhash))
+		_, _, _, err = api.Get(key, "")
 		if err == nil {
 			t.Fatalf("expected error: %v", err)
 		}
@@ -74,28 +75,27 @@ func TestApiDirUpload0(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		newbzzhash, err := fs.Upload(downloadDir, "", toEncrypt)
+		newbzzhash, err := fs.Upload(downloadDir, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// TODO: currently the hash is not deterministic in the encrypted case
-		if !toEncrypt && bzzhash != newbzzhash {
+		if bzzhash != newbzzhash {
 			t.Fatalf("download %v reuploaded has incorrect hash, expected %v, got %v", downloadDir, bzzhash, newbzzhash)
 		}
 	})
 }
 
 func TestApiDirUploadModify(t *testing.T) {
-	testFileSystem(t, func(fs *FileSystem, toEncrypt bool) {
+	testFileSystem(t, func(fs *FileSystem) {
 		api := fs.api
-		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0"), "", toEncrypt)
+		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0"), "")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
 		}
 
-		addr := storage.Address(common.Hex2Bytes(bzzhash))
-		addr, err = api.Modify(addr, "index.html", "", "")
+		key := storage.Key(common.Hex2Bytes(bzzhash))
+		key, err = api.Modify(key, "index.html", "", "")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
@@ -105,23 +105,24 @@ func TestApiDirUploadModify(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 			return
 		}
-		hash, wait, err := api.Store(bytes.NewReader(index), int64(len(index)), toEncrypt)
-		wait()
+		wg := &sync.WaitGroup{}
+		hash, err := api.Store(bytes.NewReader(index), int64(len(index)), wg)
+		wg.Wait()
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
 		}
-		addr, err = api.Modify(addr, "index2.html", hash.Hex(), "text/html; charset=utf-8")
+		key, err = api.Modify(key, "index2.html", hash.Hex(), "text/html; charset=utf-8")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
 		}
-		addr, err = api.Modify(addr, "img/logo.png", hash.Hex(), "text/html; charset=utf-8")
+		key, err = api.Modify(key, "img/logo.png", hash.Hex(), "text/html; charset=utf-8")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
 		}
-		bzzhash = addr.Hex()
+		bzzhash = key.String()
 
 		content := readPath(t, "testdata", "test0", "index.html")
 		resp := testGet(t, api, bzzhash, "index2.html")
@@ -137,7 +138,7 @@ func TestApiDirUploadModify(t *testing.T) {
 		exp = expResponse(content, "text/css", 0)
 		checkResponse(t, resp, exp)
 
-		_, _, _, _, err = api.Get(addr, "")
+		_, _, _, err = api.Get(key, "")
 		if err == nil {
 			t.Errorf("expected error: %v", err)
 		}
@@ -145,9 +146,9 @@ func TestApiDirUploadModify(t *testing.T) {
 }
 
 func TestApiDirUploadWithRootFile(t *testing.T) {
-	testFileSystem(t, func(fs *FileSystem, toEncrypt bool) {
+	testFileSystem(t, func(fs *FileSystem) {
 		api := fs.api
-		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0"), "index.html", toEncrypt)
+		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0"), "index.html")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
@@ -161,9 +162,9 @@ func TestApiDirUploadWithRootFile(t *testing.T) {
 }
 
 func TestApiFileUpload(t *testing.T) {
-	testFileSystem(t, func(fs *FileSystem, toEncrypt bool) {
+	testFileSystem(t, func(fs *FileSystem) {
 		api := fs.api
-		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0", "index.html"), "", toEncrypt)
+		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0", "index.html"), "")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
@@ -177,9 +178,9 @@ func TestApiFileUpload(t *testing.T) {
 }
 
 func TestApiFileUploadWithRootFile(t *testing.T) {
-	testFileSystem(t, func(fs *FileSystem, toEncrypt bool) {
+	testFileSystem(t, func(fs *FileSystem) {
 		api := fs.api
-		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0", "index.html"), "index.html", toEncrypt)
+		bzzhash, err := fs.Upload(filepath.Join("testdata", "test0", "index.html"), "index.html")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return

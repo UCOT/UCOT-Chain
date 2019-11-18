@@ -48,7 +48,7 @@ var (
 )
 
 // Number of implemented message corresponding to different protocol versions.
-var ProtocolLengths = map[uint]uint64{lpv1: 15, lpv2: 22}
+var ProtocolLengths = map[uint]uint64{lpv1: 15, lpv2: 24}
 
 const (
 	NetworkId          = 1
@@ -81,6 +81,10 @@ const (
 	SendTxV2Msg            = 0x13
 	GetTxStatusMsg         = 0x14
 	TxStatusMsg            = 0x15
+
+	// Protocol messages belonging to DBFTs
+	GetGroupSigMsg = 0x16
+	GroupSigMsg    = 0x17
 )
 
 type errCode int

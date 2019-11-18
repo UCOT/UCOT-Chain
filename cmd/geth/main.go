@@ -19,16 +19,12 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"runtime"
-	godebug "runtime/debug"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/elastic/gosigar"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/cmd/utils"
@@ -123,6 +119,7 @@ var (
 		utils.GpoPercentileFlag,
 		utils.ExtraDataFlag,
 		configFileFlag,
+		utils.AccessHashFlag, // Access Control
 	}
 
 	rpcFlags = []cli.Flag{
@@ -143,15 +140,6 @@ var (
 		utils.WhisperEnabledFlag,
 		utils.WhisperMaxMessageSizeFlag,
 		utils.WhisperMinPOWFlag,
-	}
-
-	metricsFlags = []cli.Flag{
-		utils.MetricsEnableInfluxDBFlag,
-		utils.MetricsInfluxDBEndpointFlag,
-		utils.MetricsInfluxDBDatabaseFlag,
-		utils.MetricsInfluxDBUsernameFlag,
-		utils.MetricsInfluxDBPasswordFlag,
-		utils.MetricsInfluxDBHostTagFlag,
 	}
 )
 
@@ -195,32 +183,12 @@ func init() {
 	app.Flags = append(app.Flags, consoleFlags...)
 	app.Flags = append(app.Flags, debug.Flags...)
 	app.Flags = append(app.Flags, whisperFlags...)
-	app.Flags = append(app.Flags, metricsFlags...)
 
 	app.Before = func(ctx *cli.Context) error {
 		runtime.GOMAXPROCS(runtime.NumCPU())
 		if err := debug.Setup(ctx); err != nil {
 			return err
 		}
-		// Cap the cache allowance and tune the garbage colelctor
-		var mem gosigar.Mem
-		if err := mem.Get(); err == nil {
-			allowance := int(mem.Total / 1024 / 1024 / 3)
-			if cache := ctx.GlobalInt(utils.CacheFlag.Name); cache > allowance {
-				log.Warn("Sanitizing cache to Go's GC limits", "provided", cache, "updated", allowance)
-				ctx.GlobalSet(utils.CacheFlag.Name, strconv.Itoa(allowance))
-			}
-		}
-		// Ensure Go's GC ignores the database cache for trigger percentage
-		cache := ctx.GlobalInt(utils.CacheFlag.Name)
-		gogc := math.Max(20, math.Min(100, 100/(float64(cache)/1024)))
-
-		log.Debug("Sanitizing Go's GC trigger", "percent", int(gogc))
-		godebug.SetGCPercent(int(gogc))
-
-		// Start metrics export if enabled
-		utils.SetupMetrics(ctx)
-
 		// Start system runtime metrics collection
 		go metrics.CollectProcessMetrics(3 * time.Second)
 
@@ -264,13 +232,24 @@ func startNode(ctx *cli.Context, stack *node.Node) {
 	// Unlock any account specifically requested
 	ks := stack.AccountManager().Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
 
-	passwords := utils.MakePasswordList(ctx)
+	passwords := utils.MakePasswordList(ctx) // read from --password
 	unlocks := strings.Split(ctx.GlobalString(utils.UnlockedAccountFlag.Name), ",")
-	for i, account := range unlocks {
-		if trimmed := strings.TrimSpace(account); trimmed != "" {
-			unlockAccount(ctx, ks, trimmed, i, passwords)
+	if len(passwords) > 2 || len(unlocks) > 1 {
+		utils.Fatalf("Currently multiple addresses is not supported")
+	} else {
+		for _, passwd := range passwords {
+			if passwd != "" {
+				stack.AssignPassPhrase(passwd)
+			}
 		}
 	}
+	for i, account := range unlocks {
+		if trimmed := strings.TrimSpace(account); trimmed != "" {
+			_, passwd := unlockAccount(ctx, ks, trimmed, i, passwords) // type in from console
+			stack.AssignPassPhrase(passwd)
+		}
+	}
+
 	// Register wallet event handlers to open and auto-derive wallets
 	events := make(chan accounts.WalletEvent, 16)
 	stack.AccountManager().Subscribe(events)

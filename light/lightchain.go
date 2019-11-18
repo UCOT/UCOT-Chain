@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// *** denotes the UCOT dedicated code
-
 package light
 
 import (
@@ -25,10 +23,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"bytes"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/consensus/dbft"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -39,10 +37,6 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/hashicorp/golang-lru"
-)
-
-const (
-	requestTimeout = time.Second * 20
 )
 
 var (
@@ -77,8 +71,6 @@ type LightChain struct {
 	wg            sync.WaitGroup
 
 	engine consensus.Engine
-
-	odrFetchCh chan int 	// ***
 }
 
 // NewLightChain returns a fully initialised light chain using information
@@ -97,7 +89,6 @@ func NewLightChain(odr OdrBackend, config *params.ChainConfig, engine consensus.
 		bodyRLPCache: bodyRLPCache,
 		blockCache:   blockCache,
 		engine:       engine,
-		odrFetchCh:   make(chan int), // ***
 	}
 	var err error
 	bc.hc, err = core.NewHeaderChain(odr.Database(), config, bc.engine, bc.getProcInterrupt)
@@ -363,78 +354,24 @@ func (self *LightChain) postChainEvents(events []interface{}) {
 // In the case of a light chain, InsertHeaderChain also creates and posts light
 // chain events when necessary.
 func (self *LightChain) InsertHeaderChain(chain []*types.Header, checkFreq int) (int, error) {
-	start := time.Now()	
-	abort := make(chan struct{})
-	defer close(abort)
-
-	self.hc.SetOdrFetchCh(self.odrFetchCh)
-	go func() {
-		for {
-			select {
-			case index := <-self.odrFetchCh:
-				var (
-					coinAge = new(big.Int)
-					ancestors_pos = make([]*types.Header, 0, core.CoinAgeWindow)
-				    grandParents  *types.Header
-				)
-				checkedHeader := types.CopyHeader(chain[index])
-				if index < core.MiningLogAtDepth {
-					if chain[index].Number.Uint64() < core.MiningLogAtDepth {
-						grandParents = self.GetHeaderByNumber(0)
-					} else {
-						grandParents = self.GetHeaderByNumber(chain[index].Number.Uint64()-core.MiningLogAtDepth)
-					}
-					ancestors_pos = append(ancestors_pos, grandParents)
-				} else {
-					grandParents = chain[index-core.MiningLogAtDepth]
-				}
-
-				for i := index-core.MiningLogAtDepth; len(ancestors_pos) < core.CoinAgeWindow && i >= 0; grandParents = chain[i] {
-					ancestors_pos = append(ancestors_pos, grandParents)
-					i--
-					if i < 0 {
-						break
-					}
-				}
-				if len(ancestors_pos) < core.CoinAgeWindow && grandParents.Number.Uint64() > 0 { // retrieve headers from database if the size is insufficient
-					parent := self.GetHeader(grandParents.ParentHash, grandParents.Number.Uint64()-1)
-					for ; len(ancestors_pos) < core.CoinAgeWindow && parent.Number.Uint64() >= 0; parent = self.GetHeader(parent.ParentHash, parent.Number.Uint64()-1) {
-						ancestors_pos = append(ancestors_pos, parent)
-						if parent.Number.Uint64() == 0 {
-							break
-						}
-					}
-				}
-				for _, ancestor := range ancestors_pos {
-					pastLightState := NewState(context.Background(), ancestor, self.odr, false) // light/trie.go -> state/statedb.go
-					if pastLightState == nil {
-						log.Error("Can't not find the state",  "header", checkedHeader.Number.Uint64(), "number", ancestor.Number.Uint64(), "root", common.ToHex(ancestor.Root[:]))
-						self.hc.GetErrorsCh() <- errors.New("Fail to retrieve the state")
-					}
-					coinAge.Add(coinAge, pastLightState.GetBalance(checkedHeader.Coinbase))
-				}
-
-				if !bytes.Equal(coinAge.Bytes(), checkedHeader.CoinAge) {
-					self.hc.GetErrorsCh() <- errors.New("Invalid Past CoinAge")
-					// return int(lastHeader.Number.Uint64()), errors.New("Invalid Invalid Past CoinAge")
-				} else {
-					self.hc.GetErrorsCh() <- nil
-				}
-				// self.hc.wg.Done()
-			case <-time.After(requestTimeout):
-				log.Warn("Time out then rollback")
-				self.hc.GetErrorsCh() <- errors.New("Timeout then rollback")
-			case <-abort:
-				log.Trace("OdrFetch Process done")
-				return
-			}
+	//log.Trace("start insertheaderchain")
+	start := time.Now()
+	if i, err := self.hc.ValidateHeaderChain(chain, checkFreq); err != nil {
+		if err != consensus.ErrFutureBlock { // allow future headers
+			return i, err
 		}
-	}()
-
-	if i, err := self.hc.ValidateHeaderChain(chain, checkFreq, true); err != nil {
-		return i, err
 	}
 
+	// *** Fetch groupSignature and validated in les/odr_requests.go, and be removed after validation.
+	//log.Trace("start getGroupSig")
+	if _, ok := self.engine.(*dbft.Dbft); ok {
+		latestHeader := types.CopyHeader(chain[len(chain)-1])
+		_, err := GetGroupSig(context.Background(), self.odr, latestHeader.Hash(), latestHeader.Number.Uint64(), latestHeader)
+		if err != nil {
+			return int(latestHeader.Number.Uint64()), err
+		}
+	}
+	//log.Trace("finish getGroupSig")
 	// Make sure only one thread manipulates the chain at once
 	self.chainmu.Lock()
 	defer func() {
@@ -508,18 +445,6 @@ func (bc *LightChain) HasHeader(hash common.Hash, number uint64) bool {
 // hash, fetching towards the genesis block.
 func (self *LightChain) GetBlockHashesFromHash(hash common.Hash, max uint64) []common.Hash {
 	return self.hc.GetBlockHashesFromHash(hash, max)
-}
-
-// GetAncestor retrieves the Nth ancestor of a given block. It assumes that either the given block or
-// a close ancestor of it is canonical. maxNonCanonical points to a downwards counter limiting the
-// number of blocks to be individually checked before we reach the canonical chain.
-//
-// Note: ancestor == 0 returns the same block, 1 returns its parent and so on.
-func (bc *LightChain) GetAncestor(hash common.Hash, number, ancestor uint64, maxNonCanonical *uint64) (common.Hash, uint64) {
-	bc.chainmu.Lock()
-	defer bc.chainmu.Unlock()
-
-	return bc.hc.GetAncestor(hash, number, ancestor, maxNonCanonical)
 }
 
 // GetHeaderByNumber retrieves a block header from the database by number,

@@ -31,13 +31,9 @@ package protocols
 import (
 	"context"
 	"fmt"
-	"io"
 	"reflect"
 	"sync"
-	"time"
 
-	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/p2p"
 )
 
@@ -204,11 +200,6 @@ func NewPeer(p *p2p.Peer, rw p2p.MsgReadWriter, spec *Spec) *Peer {
 func (p *Peer) Run(handler func(msg interface{}) error) error {
 	for {
 		if err := p.handleIncoming(handler); err != nil {
-			if err != io.EOF {
-				metrics.GetOrRegisterCounter("peer.handleincoming.error", nil).Inc(1)
-				log.Error("peer.handleIncoming", "err", err)
-			}
-
 			return err
 		}
 	}
@@ -226,8 +217,6 @@ func (p *Peer) Drop(err error) {
 // this low level call will be wrapped by libraries providing routed or broadcast sends
 // but often just used to forward and push messages to directly connected peers
 func (p *Peer) Send(msg interface{}) error {
-	defer metrics.GetOrRegisterResettingTimer("peer.send_t", nil).UpdateSince(time.Now())
-	metrics.GetOrRegisterCounter("peer.send", nil).Inc(1)
 	code, found := p.spec.GetCode(msg)
 	if !found {
 		return errorf(ErrInvalidMsgType, "%v", code)
@@ -320,4 +309,3 @@ func (p *Peer) Handshake(ctx context.Context, hs interface{}, verify func(interf
 	}
 	return rhs, nil
 }
-

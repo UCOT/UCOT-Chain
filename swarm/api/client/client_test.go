@@ -26,42 +26,27 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/swarm/api"
-	swarmhttp "github.com/ethereum/go-ethereum/swarm/api/http"
 	"github.com/ethereum/go-ethereum/swarm/testutil"
 )
 
-func serverFunc(api *api.API) testutil.TestServer {
-	return swarmhttp.NewServer(api)
-}
-
 // TestClientUploadDownloadRaw test uploading and downloading raw data to swarm
 func TestClientUploadDownloadRaw(t *testing.T) {
-	testClientUploadDownloadRaw(false, t)
-}
-func TestClientUploadDownloadRawEncrypted(t *testing.T) {
-	testClientUploadDownloadRaw(true, t)
-}
-
-func testClientUploadDownloadRaw(toEncrypt bool, t *testing.T) {
-	srv := testutil.NewTestSwarmServer(t, serverFunc)
+	srv := testutil.NewTestSwarmServer(t)
 	defer srv.Close()
 
 	client := NewClient(srv.URL)
 
 	// upload some raw data
 	data := []byte("foo123")
-	hash, err := client.UploadRaw(bytes.NewReader(data), int64(len(data)), toEncrypt)
+	hash, err := client.UploadRaw(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// check we can download the same data
-	res, isEncrypted, err := client.DownloadRaw(hash)
+	res, err := client.DownloadRaw(hash)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if isEncrypted != toEncrypt {
-		t.Fatalf("Expected encyption status %v got %v", toEncrypt, isEncrypted)
 	}
 	defer res.Close()
 	gotData, err := ioutil.ReadAll(res)
@@ -76,15 +61,7 @@ func testClientUploadDownloadRaw(toEncrypt bool, t *testing.T) {
 // TestClientUploadDownloadFiles test uploading and downloading files to swarm
 // manifests
 func TestClientUploadDownloadFiles(t *testing.T) {
-	testClientUploadDownloadFiles(false, t)
-}
-
-func TestClientUploadDownloadFilesEncrypted(t *testing.T) {
-	testClientUploadDownloadFiles(true, t)
-}
-
-func testClientUploadDownloadFiles(toEncrypt bool, t *testing.T) {
-	srv := testutil.NewTestSwarmServer(t, serverFunc)
+	srv := testutil.NewTestSwarmServer(t)
 	defer srv.Close()
 
 	client := NewClient(srv.URL)
@@ -97,7 +74,7 @@ func testClientUploadDownloadFiles(toEncrypt bool, t *testing.T) {
 				Size:        int64(len(data)),
 			},
 		}
-		hash, err := client.Upload(file, manifest, toEncrypt)
+		hash, err := client.Upload(file, manifest)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -182,7 +159,7 @@ func newTestDirectory(t *testing.T) string {
 // TestClientUploadDownloadDirectory tests uploading and downloading a
 // directory of files to a swarm manifest
 func TestClientUploadDownloadDirectory(t *testing.T) {
-	srv := testutil.NewTestSwarmServer(t, serverFunc)
+	srv := testutil.NewTestSwarmServer(t)
 	defer srv.Close()
 
 	dir := newTestDirectory(t)
@@ -191,7 +168,7 @@ func TestClientUploadDownloadDirectory(t *testing.T) {
 	// upload the directory
 	client := NewClient(srv.URL)
 	defaultPath := filepath.Join(dir, testDirFiles[0])
-	hash, err := client.UploadDirectory(dir, defaultPath, "", false)
+	hash, err := client.UploadDirectory(dir, defaultPath, "")
 	if err != nil {
 		t.Fatalf("error uploading directory: %s", err)
 	}
@@ -240,22 +217,14 @@ func TestClientUploadDownloadDirectory(t *testing.T) {
 
 // TestClientFileList tests listing files in a swarm manifest
 func TestClientFileList(t *testing.T) {
-	testClientFileList(false, t)
-}
-
-func TestClientFileListEncrypted(t *testing.T) {
-	testClientFileList(true, t)
-}
-
-func testClientFileList(toEncrypt bool, t *testing.T) {
-	srv := testutil.NewTestSwarmServer(t, serverFunc)
+	srv := testutil.NewTestSwarmServer(t)
 	defer srv.Close()
 
 	dir := newTestDirectory(t)
 	defer os.RemoveAll(dir)
 
 	client := NewClient(srv.URL)
-	hash, err := client.UploadDirectory(dir, "", "", toEncrypt)
+	hash, err := client.UploadDirectory(dir, "", "")
 	if err != nil {
 		t.Fatalf("error uploading directory: %s", err)
 	}
@@ -306,7 +275,7 @@ func testClientFileList(toEncrypt bool, t *testing.T) {
 // TestClientMultipartUpload tests uploading files to swarm using a multipart
 // upload
 func TestClientMultipartUpload(t *testing.T) {
-	srv := testutil.NewTestSwarmServer(t, serverFunc)
+	srv := testutil.NewTestSwarmServer(t)
 	defer srv.Close()
 
 	// define an uploader which uploads testDirFiles with some data

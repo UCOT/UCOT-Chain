@@ -74,6 +74,11 @@ type keyStorePassphrase struct {
 	scryptP     int
 }
 
+func NewKeyStorePassphrase(keydir string, scryptN, scryptP int) *keyStorePassphrase {
+	ks := &keyStorePassphrase{keydir, scryptN, scryptP}
+	return ks
+}
+
 func (ks keyStorePassphrase) GetKey(addr common.Address, filename, auth string) (*Key, error) {
 	// Load the key from the keystore and decrypt its contents
 	keyjson, err := ioutil.ReadFile(filename)

@@ -30,25 +30,9 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 )
 
-// // nodeDockerfile is the Dockerfile required to run an Ethereum node.
-// var nodeDockerfile = `
-// FROM ethereum/client-go:latest
-
-// ADD genesis.json /genesis.json
-// {{if .Unlock}}
-// 	ADD signer.json /signer.json
-// 	ADD signer.pass /signer.pass
-// {{end}}
-// RUN \
-//   echo 'geth --cache 512 init /genesis.json' > geth.sh && \{{if .Unlock}}
-// 	echo 'mkdir -p /root/.ethereum/keystore/ && cp /signer.json /root/.ethereum/keystore/' >> geth.sh && \{{end}}
-// 	echo $'geth --networkid {{.NetworkID}} --cache 512 --port {{.Port}} --maxpeers {{.Peers}} {{.LightFlag}} --ethstats \'{{.Ethstats}}\' {{if .Bootnodes}}--bootnodes {{.Bootnodes}}{{end}} {{if .Etherbase}}--etherbase {{.Etherbase}} --mine --minerthreads 1{{end}} {{if .Unlock}}--unlock 0 --password /signer.pass --mine{{end}} --targetgaslimit {{.GasTarget}} --gasprice {{.GasPrice}}' >> geth.sh
-
-// ENTRYPOINT ["/bin/sh", "geth.sh"]
-// `
-
+// nodeDockerfile is the Dockerfile required to run an Ethereum node.
 var nodeDockerfile = `
-FROM reimusaber/ucot_token_test:latest
+FROM ethereum/client-go:latest
 
 ADD genesis.json /genesis.json
 {{if .Unlock}}

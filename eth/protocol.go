@@ -32,16 +32,19 @@ import (
 const (
 	eth62 = 62
 	eth63 = 63
+	eth64 = 64 // dbft messages
 )
 
-// ProtocolName is the official short name of the protocol used during capability negotiation.
+// Official short name of the protocol used during capability negotiation.
 var ProtocolName = "eth"
 
-// ProtocolVersions are the upported versions of the eth protocol (first is primary).
-var ProtocolVersions = []uint{eth63, eth62}
+// Supported versions of the eth protocol (first is primary).
+var ProtocolVersions = []uint{eth64, eth63, eth62}
 
-// ProtocolLengths are the number of implemented message corresponding to different protocol versions.
-var ProtocolLengths = []uint64{17, 8}
+// Number of implemented message corresponding to different protocol versions.
+var ProtocolLengths = []uint64{23, 17, 8}
+
+// var ProtocolLengths = []uint64{21, 17, 8}
 
 const ProtocolMaxMsgSize = 10 * 1024 * 1024 // Maximum cap on the size of a protocol message
 
@@ -62,6 +65,14 @@ const (
 	NodeDataMsg    = 0x0e
 	GetReceiptsMsg = 0x0f
 	ReceiptsMsg    = 0x10
+
+	// Protocol messages belonging to eth/64 (dbft)
+	PrepareRequestMsg   = 0x11
+	PrepareResponseMsg  = 0x12
+	ChangeViewMsg       = 0x13
+	BroadcastNewViewMsg = 0x14
+	TxRequestMsg        = 0x15
+	TxResponseMsg       = 0x16
 )
 
 type errCode int
@@ -76,6 +87,14 @@ const (
 	ErrNoStatusMsg
 	ErrExtraStatusMsg
 	ErrSuspendedPeer
+
+	// Error messages belonging to eth/64 (dbft)
+	ErrSpeaker
+	ErrPreResp
+	ErrChangeV
+	ErrNewV
+	ErrTxReq
+	ErrTxResp
 )
 
 func (e errCode) String() string {
@@ -93,6 +112,13 @@ var errorToString = map[int]string{
 	ErrNoStatusMsg:             "No status message",
 	ErrExtraStatusMsg:          "Extra status message",
 	ErrSuspendedPeer:           "Suspended peer",
+
+	ErrSpeaker: "Unknown speaker as local node is being the speaker",
+	ErrPreResp: "Fail to recognize PrepareResponseMsg",
+	ErrChangeV: "Fail to recognize ChangeView",
+	ErrNewV:   	"Fail to recognize BroadcastNewViewMsg",
+	ErrTxReq:  	"Invalid TxRequest",
+	ErrTxResp: 	"Invalid TxResponse",
 }
 
 type txPool interface {
@@ -103,9 +129,9 @@ type txPool interface {
 	// The slice should be modifiable by the caller.
 	Pending() (map[common.Address]types.Transactions, error)
 
-	// SubscribeNewTxsEvent should return an event subscription of
-	// NewTxsEvent and send events to the given channel.
-	SubscribeNewTxsEvent(chan<- core.NewTxsEvent) event.Subscription
+	// SubscribeTxPreEvent should return an event subscription of
+	// TxPreEvent and send events to the given channel.
+	SubscribeTxPreEvent(chan<- core.TxPreEvent) event.Subscription
 }
 
 // statusData is the network packet for the status message.
@@ -175,8 +201,9 @@ type newBlockData struct {
 
 // blockBody represents the data content of a single block.
 type blockBody struct {
-	Transactions []*types.Transaction // Transactions contained within a block
-	Uncles       []*types.Header      // Uncles contained within a block
+	Transactions    []*types.Transaction    // Transactions contained within a block
+	Uncles          []*types.Header         // Uncles contained within a block
+	GroupSignatures []*types.GroupSignature // GroupSig contained within a block
 }
 
 // blockBodiesData is the network packet for block content distribution.

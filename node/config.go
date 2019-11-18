@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"errors"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
@@ -41,6 +42,7 @@ const (
 	datadirStaticNodes     = "static-nodes.json"  // Path within the datadir to the static node list
 	datadirTrustedNodes    = "trusted-nodes.json" // Path within the datadir to the trusted node list
 	datadirNodeDatabase    = "nodes"              // Path within the datadir to store the node infos
+	datadirAddrNodeMapping = "addr-node-map.json" // Path within the datadir to store the mapping between addresses and nodeIDs
 )
 
 // Config represents a small collection of configuration values to fine tune the
@@ -147,6 +149,9 @@ type Config struct {
 
 	// Logger is a custom logger to use with the p2p.Server.
 	Logger log.Logger `toml:",omitempty"`
+
+	// Need to be checked if this is secure
+	PassPhrase string `toml:",omitempty"`
 }
 
 // IPCEndpoint resolves an IPC endpoint based on a configured value, taking into
@@ -292,6 +297,13 @@ func (c *Config) instanceDir() string {
 	return filepath.Join(c.DataDir, c.name())
 }
 
+func (c *Config) KeystoreDir() string {
+	if c.DataDir == "" {
+		return ""
+	}
+	return filepath.Join(c.DataDir, datadirDefaultKeyStore)
+}
+
 // NodeKey retrieves the currently configured private key of the node, checking
 // first any manually set key, falling back to the one found in the configured
 // data folder. If no key can be found, a new one is generated.
@@ -338,6 +350,73 @@ func (c *Config) StaticNodes() []*discover.Node {
 // TrustedNodes returns a list of node enode URLs configured as trusted nodes.
 func (c *Config) TrustedNodes() []*discover.Node {
 	return c.parsePersistentNodes(c.resolvePath(datadirTrustedNodes))
+}
+
+func (c *Config) AddrNodeMapping() map[common.Address]string {
+	return c.parseMapping(c.resolvePath(datadirAddrNodeMapping))
+}
+
+func (c *Config) parseMapping(path string) map[common.Address]string {
+	// Short circuit if no node config is present
+	if c.DataDir == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	// Load the nodes from the config file.
+	var mappinglist []string
+	if err := common.LoadJSON(path, &mappinglist); err != nil {
+		log.Error(fmt.Sprintf("Can't load node file %s: %v", path, err))
+		return nil
+	}
+	// Interpret the list as a mapping between addresses and nodeIDs
+	addr_node_map := make(map[common.Address]string)
+
+	idLength := 64
+	isHexCharacter := func (c byte) bool {
+		return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
+	}
+	isHex := func (str string) bool {
+		if len(str)%2 != 0 {
+			return false
+		}
+		for _, c := range []byte(str) {
+			if !isHexCharacter(c) {
+				return false
+			}
+		}
+		return true
+	}
+	isNodeID := func (s string) bool {
+		if len(s) == 2+2*idLength && isHex(s[2:]) {
+			return true
+		}
+		if len(s) == 2*idLength && isHex(s) {
+			return true
+		}
+		return false
+	}
+	for _, mapping := range mappinglist {
+		if mapping == "" {
+			continue
+		}
+		arr := strings.Split(mapping, ":")
+		if len(arr) != 2 {
+			log.Error(fmt.Sprintf("Mapping %s: %v\n", mapping, errors.New("Invalid mapping format")))
+			continue
+		}
+		if !common.IsHexAddress(arr[0]) {
+			log.Error(fmt.Sprintf("Mapping %s: %v\n", mapping, errors.New("Invalid address format")))
+			continue
+		}
+		if !isNodeID(arr[1]) {
+			log.Error(fmt.Sprintf("Mapping %s: %v\n", mapping, errors.New("Invalid nodeID format")))
+			continue
+		}
+		addr_node_map[common.HexToAddress(arr[0])] = arr[1]
+	}
+	return addr_node_map
 }
 
 // parsePersistentNodes parses a list of discovery node URLs loaded from a .json

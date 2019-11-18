@@ -29,16 +29,12 @@ func (g Genesis) MarshalJSON() ([]byte, error) {
 		Number     math.HexOrDecimal64                         `json:"number"`
 		GasUsed    math.HexOrDecimal64                         `json:"gasUsed"`
 		ParentHash common.Hash                                 `json:"parentHash"`
-		CoinAge    hexutil.Bytes                               `json:"coinAge"` //***
-		CoinMined  hexutil.Bytes                               `json:"coinMined"` //***
 	}
 	var enc Genesis
 	enc.Config = g.Config
 	enc.Nonce = math.HexOrDecimal64(g.Nonce)
 	enc.Timestamp = math.HexOrDecimal64(g.Timestamp)
 	enc.ExtraData = g.ExtraData
-	enc.CoinAge = g.CoinAge //***
-	enc.CoinMined = g.CoinMined //***
 	enc.GasLimit = math.HexOrDecimal64(g.GasLimit)
 	enc.Difficulty = (*math.HexOrDecimal256)(g.Difficulty)
 	enc.Mixhash = g.Mixhash
@@ -69,8 +65,6 @@ func (g *Genesis) UnmarshalJSON(input []byte) error {
 		Number     *math.HexOrDecimal64                        `json:"number"`
 		GasUsed    *math.HexOrDecimal64                        `json:"gasUsed"`
 		ParentHash *common.Hash                                `json:"parentHash"`
-		CoinAge    *hexutil.Bytes                              `json:"coinAge"` //***
-		CoinMined  *hexutil.Bytes                              `json:"coinMined"` //***
 	}
 	var dec Genesis
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -117,12 +111,6 @@ func (g *Genesis) UnmarshalJSON(input []byte) error {
 	}
 	if dec.ParentHash != nil {
 		g.ParentHash = *dec.ParentHash
-	}
-	if dec.CoinAge != nil { //***
-		g.CoinAge = *dec.CoinAge
-	}
-	if dec.CoinMined != nil { //***
-		g.CoinMined = *dec.CoinMined
 	}
 	return nil
 }

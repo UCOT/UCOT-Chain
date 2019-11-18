@@ -27,7 +27,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/consensus/dbft"
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -35,6 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/fetcher"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/discover"
@@ -46,9 +49,9 @@ const (
 	softResponseLimit = 2 * 1024 * 1024 // Target maximum size of returned blocks, headers or node data.
 	estHeaderRlpSize  = 500             // Approximate size of an RLP encoded block header
 
-	// txChanSize is the size of channel listening to NewTxsEvent.
+	// txChanSize is the size of channel listening to TxPreEvent.
 	// The number is referenced from the size of tx pool.
-	txChanSize = 4096
+	txChanSize = 4096000
 )
 
 var (
@@ -64,53 +67,84 @@ func errResp(code errCode, format string, v ...interface{}) error {
 }
 
 type ProtocolManager struct {
-	networkID uint64
+	networkId      	uint64
+	addr           	common.Address
+	nodeID         	string
 
-	fastSync  uint32 // Flag whether fast sync is enabled (gets disabled if we already have blocks)
-	acceptTxs uint32 // Flag whether we're considered synchronised (enables transaction processing)
+	fastSync       	uint32 // Flag whether fast sync is enabled (gets disabled if we already have blocks)
+	acceptTxs      	uint32 // Flag whether we're considered synchronised (enables transaction processing)
 
-	txpool      txPool
-	blockchain  *core.BlockChain
-	chainconfig *params.ChainConfig
-	maxPeers    int
+	inRound 		bool
+	view 	  	   	uint64
+	pIndex 			uint64
+	iIndex 			uint64
 
-	downloader *downloader.Downloader
-	fetcher    *fetcher.Fetcher
-	peers      *peerSet
+	// txpool      txPool
+	txpool         	*core.TxPool
+	blockchain     	*core.BlockChain
+	chainconfig    	*params.ChainConfig
+	maxPeers       	int
+
+	downloader     	*downloader.Downloader
+	fetcher        	*fetcher.Fetcher
+	peers          	*peerSet
 
 	SubProtocols []p2p.Protocol
 
-	eventMux      *event.TypeMux
-	txsCh         chan core.NewTxsEvent
-	txsSub        event.Subscription
-	minedBlockSub *event.TypeMuxSubscription
+	eventMux        *event.TypeMux
+	txCh            chan core.TxPreEvent
+	txSub           event.Subscription
+	minedBlockSub   *event.TypeMuxSubscription
+
+	// dbft
+	dbftSub     	*event.TypeMuxSubscription
+	addrToNodeID    map[common.Address]string
+	peerID    		[]interface{} // Slice of all NodeIDs of peers.
 
 	// channels for fetcher, syncer, txsyncLoop
-	newPeerCh   chan *peer
-	txsyncCh    chan *txsync
-	quitSync    chan struct{}
-	noMorePeers chan struct{}
+	newPeerCh   	chan *peer
+	txsyncCh    	chan *txsync
+	quitSync    	chan struct{}
+	noMorePeers 	chan struct{}
 
 	// wait group is used for graceful shutdowns during downloading
 	// and processing
 	wg sync.WaitGroup
 }
 
-// NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
-// with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database) (*ProtocolManager, error) {
+// NewProtocolManager returns a new ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
+// with the ethereum network.
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, networkId uint64, mux *event.TypeMux, txpool *core.TxPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, ctx *node.ServiceContext) (*ProtocolManager, error) {
+	//Get Address and NodeID
+	miners := blockchain.GetLastVote()
+
+	addressToNodeID := ctx.GetConfig().P2P.AddressNodeMapping
+	_, _, localAddr, err := dbft.GetNodeConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
-		networkID:   networkID,
-		eventMux:    mux,
-		txpool:      txpool,
-		blockchain:  blockchain,
-		chainconfig: config,
-		peers:       newPeerSet(),
-		newPeerCh:   make(chan *peer),
-		noMorePeers: make(chan struct{}),
-		txsyncCh:    make(chan *txsync),
-		quitSync:    make(chan struct{}),
+		networkId:       networkId,
+		addr: 			 localAddr,
+		nodeID: 		 dbft.HexToID(false, dbft.GetNodeID(ctx)).(string),
+		eventMux:        mux,
+		txpool:          txpool,
+		blockchain:      blockchain,
+		chainconfig:     config,
+		peers:           newPeerSet(),
+		newPeerCh:       make(chan *peer),
+		noMorePeers:     make(chan struct{}),
+		txsyncCh:        make(chan *txsync),
+		quitSync:        make(chan struct{}),
+		addrToNodeID: 	 addressToNodeID,
+		peerID:    		 dbft.AddrListToNodeList(addressToNodeID, miners),
+	}
+	// Dbft only allows FullSync due to the process of consensus protocol
+	if _, ok := engine.(*dbft.Dbft); ok {
+		log.Trace("DBFT only allows FullSync for validation nodes")
+		mode = downloader.FullSync
 	}
 	// Figure out whether to allow fast sync or not
 	if mode == downloader.FastSync && blockchain.CurrentBlock().NumberU64() > 0 {
@@ -135,6 +169,8 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 			Length:  ProtocolLengths[i],
 			Run: func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
 				peer := manager.newPeer(int(version), p, rw)
+				// log.Trace("Showing the eth/peers")
+				// fmt.Println(peer.String())
 				select {
 				case manager.newPeerCh <- peer:
 					manager.wg.Add(1)
@@ -204,13 +240,31 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 	pm.maxPeers = maxPeers
 
 	// broadcast transactions
-	pm.txsCh = make(chan core.NewTxsEvent, txChanSize)
-	pm.txsSub = pm.txpool.SubscribeNewTxsEvent(pm.txsCh)
-	go pm.txBroadcastLoop()
+	pm.txCh = make(chan core.TxPreEvent, txChanSize)
+	pm.txSub = pm.txpool.SubscribeTxPreEvent(pm.txCh) 
+
+	if !pm.isMiner() {
+		log.Trace("Start txBroadcastLoop")
+		go pm.txBroadcastLoop()
+	} else {
+		log.Warn("Local is a miner. txBroadcastLoop disabled.", "nodeID", pm.nodeID)
+	}
 
 	// broadcast mined blocks
 	pm.minedBlockSub = pm.eventMux.Subscribe(core.NewMinedBlockEvent{})
 	go pm.minedBroadcastLoop()
+
+	// dbft consensus
+	pm.dbftSub = pm.eventMux.Subscribe(
+		dbft.RoundStateEvent{},
+		dbft.PrepareReqEvent{},
+		dbft.PrepareRespEvent{},
+		dbft.ChangeViewEvent{},
+		dbft.AdvertToNewViewEvent{},
+		dbft.SendTxReqEvent{},
+		dbft.SendTxRespEvent{},
+	)
+	go pm.dbftLoop()
 
 	// start sync handlers
 	go pm.syncer()
@@ -220,8 +274,9 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 func (pm *ProtocolManager) Stop() {
 	log.Info("Stopping Ethereum protocol")
 
-	pm.txsSub.Unsubscribe()        // quits txBroadcastLoop
+	pm.txSub.Unsubscribe()         // quits txBroadcastLoop
 	pm.minedBlockSub.Unsubscribe() // quits blockBroadcastLoop
+	pm.dbftSub.Unsubscribe()       // quits dbftLoop
 
 	// Quit the sync loop.
 	// After this send has completed, no new peers will be accepted.
@@ -249,7 +304,6 @@ func (pm *ProtocolManager) newPeer(pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *p
 // handle is the callback invoked to manage the life cycle of an eth peer. When
 // this function terminates, the peer is disconnected.
 func (pm *ProtocolManager) handle(p *peer) error {
-	// Ignore maxPeers if this is a trusted peer
 	if pm.peers.Len() >= pm.maxPeers && !p.Peer.Info().Network.Trusted {
 		return p2p.DiscTooManyPeers
 	}
@@ -263,7 +317,7 @@ func (pm *ProtocolManager) handle(p *peer) error {
 		number  = head.Number.Uint64()
 		td      = pm.blockchain.GetTd(hash, number)
 	)
-	if err := p.Handshake(pm.networkID, td, hash, genesis.Hash()); err != nil {
+	if err := p.Handshake(pm.networkId, td, hash, genesis.Hash()); err != nil {
 		p.Log().Debug("Ethereum handshake failed", "err", err)
 		return err
 	}
@@ -340,8 +394,6 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			return errResp(ErrDecode, "%v: %v", msg, err)
 		}
 		hashMode := query.Origin.Hash != (common.Hash{})
-		first := true
-		maxNonCanonical := uint64(100)
 
 		// Gather headers until the fetch or network limits is reached
 		var (
@@ -353,36 +405,31 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			// Retrieve the next header satisfying the query
 			var origin *types.Header
 			if hashMode {
-				if first {
-					first = false
-					origin = pm.blockchain.GetHeaderByHash(query.Origin.Hash)
-					if origin != nil {
-						query.Origin.Number = origin.Number.Uint64()
-					}
-				} else {
-					origin = pm.blockchain.GetHeader(query.Origin.Hash, query.Origin.Number)
-				}
+				origin = pm.blockchain.GetHeaderByHash(query.Origin.Hash)
 			} else {
 				origin = pm.blockchain.GetHeaderByNumber(query.Origin.Number)
 			}
 			if origin == nil {
 				break
 			}
+			number := origin.Number.Uint64()
 			headers = append(headers, origin)
 			bytes += estHeaderRlpSize
 
 			// Advance to the next header of the query
 			switch {
-			case hashMode && query.Reverse:
+			case query.Origin.Hash != (common.Hash{}) && query.Reverse:
 				// Hash based traversal towards the genesis block
-				ancestor := query.Skip + 1
-				if ancestor == 0 {
-					unknown = true
-				} else {
-					query.Origin.Hash, query.Origin.Number = pm.blockchain.GetAncestor(query.Origin.Hash, query.Origin.Number, ancestor, &maxNonCanonical)
-					unknown = (query.Origin.Hash == common.Hash{})
+				for i := 0; i < int(query.Skip)+1; i++ {
+					if header := pm.blockchain.GetHeader(query.Origin.Hash, number); header != nil {
+						query.Origin.Hash = header.ParentHash
+						number--
+					} else {
+						unknown = true
+						break
+					}
 				}
-			case hashMode && !query.Reverse:
+			case query.Origin.Hash != (common.Hash{}) && !query.Reverse:
 				// Hash based traversal towards the leaf block
 				var (
 					current = origin.Number.Uint64()
@@ -394,10 +441,8 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 					unknown = true
 				} else {
 					if header := pm.blockchain.GetHeaderByNumber(next); header != nil {
-						nextHash := header.Hash()
-						expOldHash, _ := pm.blockchain.GetAncestor(nextHash, next, query.Skip+1, &maxNonCanonical)
-						if expOldHash == query.Origin.Hash {
-							query.Origin.Hash, query.Origin.Number = nextHash, next
+						if pm.blockchain.GetBlockHashesFromHash(header.Hash(), query.Skip+1)[query.Skip] == query.Origin.Hash {
+							query.Origin.Hash = header.Hash()
 						} else {
 							unknown = true
 						}
@@ -507,20 +552,29 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			return errResp(ErrDecode, "msg %v: %v", msg, err)
 		}
 		// Deliver them all to the downloader for queuing
-		transactions := make([][]*types.Transaction, len(request))
+		trasactions := make([][]*types.Transaction, len(request))
 		uncles := make([][]*types.Header, len(request))
+		groupSig := make([][]*types.GroupSignature, len(request))
 
 		for i, body := range request {
-			transactions[i] = body.Transactions
+			trasactions[i] = body.Transactions
 			uncles[i] = body.Uncles
+			groupSig[i] = body.GroupSignatures
+		}
+
+		if len(groupSig) == 0 && len(request) != 0 {
+			log.Error("Failed to fetch groupSigs")
+			break
 		}
 		// Filter out any explicitly requested bodies, deliver the rest to the downloader
-		filter := len(transactions) > 0 || len(uncles) > 0
+		//filter := len(trasactions) > 0 || len(uncles) > 0 || len(groupSig) > 0
+		filter := len(trasactions) > 0 || len(uncles) > 0
 		if filter {
-			transactions, uncles = pm.fetcher.FilterBodies(p.id, transactions, uncles, time.Now())
+			trasactions, uncles, groupSig = pm.fetcher.FilterBodies(p.id, trasactions, uncles, groupSig, time.Now())
 		}
-		if len(transactions) > 0 || len(uncles) > 0 || !filter {
-			err := pm.downloader.DeliverBodies(p.id, transactions, uncles)
+		//if len(trasactions) > 0 || len(uncles) > 0 || len(groupSig) > 0 || !filter {
+		if len(trasactions) > 0 || len(uncles) > 0 || !filter {
+			err := pm.downloader.DeliverBodies(p.id, trasactions, uncles, groupSig)
 			if err != nil {
 				log.Debug("Failed to deliver bodies", "err", err)
 			}
@@ -640,6 +694,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		request.Block.ReceivedAt = msg.ReceivedAt
 		request.Block.ReceivedFrom = p
 
+		if request.Block.GroupSignatures() == nil { //***
+			log.Trace("This propagation does not contain any groupSignature.")
+			break
+		}
+
 		// Mark the peer as owning the block and schedule it for import
 		p.MarkBlock(request.Block.Hash())
 		pm.fetcher.Enqueue(p.id, request.Block)
@@ -682,6 +741,76 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		pm.txpool.AddRemotes(txs)
 
+	// dbft messages
+	case msg.Code == PrepareRequestMsg:
+		log.Trace("A prepareRequestMsg has been received.")
+		if pm.isSpeaker() {
+			log.Trace("Local is the speaker this round. Drop this msg.")
+			break
+		}
+		var preReq *dbft.PrepareRequest
+		if err := msg.Decode(&preReq); err != nil {
+			return errResp(ErrSpeaker, "msg %v: %v", msg, err)
+		}
+		go pm.eventMux.Post(dbft.GetPrepareReqEvent{preReq})
+
+	case msg.Code == PrepareResponseMsg:
+		log.Trace("A prepareResponseMsg has been received.")
+		if pm.isSpeaker() {
+			log.Trace("Local is the speaker this round. Drop this msg.")
+			break
+		} else {
+			var preResp *dbft.PrepareResponse
+			if err := msg.Decode(&preResp); err != nil {
+				return errResp(ErrPreResp, "msg %v: %v", msg, err)
+			}
+
+			go pm.eventMux.Post(dbft.GetPrepareRespEvent{preResp})
+		}
+
+	case msg.Code == ChangeViewMsg:
+		log.Trace("A ChangeViewMsg has been received.")
+		var changeV *dbft.ControlChangeV
+		if err := msg.Decode(&changeV); err != nil {
+			return errResp(ErrChangeV, "msg %v: %v", msg, err)
+		}
+		log.Trace("Check status", "height", changeV.Get().Height, "view", changeV.Get().View, "i", changeV.Get().IIndex, "newView", changeV.Get().ViewNew)
+		go pm.eventMux.Post(dbft.GetChangeViewEvent{changeV})
+
+	case msg.Code == BroadcastNewViewMsg:
+		log.Trace("A BroadcastNewViewMsg has been received.")
+		var newV *dbft.ControlNewViewBroadCast
+		if err := msg.Decode(&newV); err != nil {
+			return errResp(ErrNewV, "msg %v: %v", msg, err)
+		}
+		go pm.eventMux.Post(dbft.GetAdvertToNewViewEvent{newV})
+
+	case msg.Code == TxRequestMsg:
+		log.Trace("A TxRequestMsg has been received.")
+		if !pm.isSpeaker() {
+			var txReq *dbft.ControlTxRequest
+			if err := msg.Decode(&txReq); err != nil {
+				return errResp(ErrTxReq, "msg %v: %v", msg, err)
+			}
+			log.Trace("Rejected txreq", "height", txReq.TxReq.Height, "i", txReq.TxReq.IIndex, "p", txReq.TxReq.PIndex, "v", txReq.TxReq.VIndex )
+			log.Trace("Local is not the speaker this round. Drop this msg.")
+			break
+		} else {
+			var txReq *dbft.ControlTxRequest
+			if err := msg.Decode(&txReq); err != nil {
+				return errResp(ErrTxReq, "msg %v: %v", msg, err)
+			}
+			go pm.eventMux.Post(dbft.GetTxReqEvent{txReq})
+		}
+
+	case msg.Code == TxResponseMsg:
+		log.Trace("A TxReponseMsg has been received.")
+		var txResp *dbft.TxResponse
+		if err := msg.Decode(&txResp); err != nil {
+			return errResp(ErrTxResp, "msg %v: %v", msg, err)
+		}
+		go pm.eventMux.Post(dbft.GetTxRespEvent{txResp})
+
 	default:
 		return errResp(ErrInvalidMsgCode, "%v", msg.Code)
 	}
@@ -691,6 +820,12 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 // BroadcastBlock will either propagate a block to a subset of it's peers, or
 // will only announce it's availability (depending what's requested).
 func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
+	calcElapsed := func(start mclock.AbsTime) time.Duration {
+		now := mclock.Now()
+		elapsed := time.Duration(now) - time.Duration(start)
+		return elapsed
+	}
+
 	hash := block.Hash()
 	peers := pm.peers.PeersWithoutBlock(hash)
 
@@ -704,40 +839,229 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 			log.Error("Propagating dangling block", "number", block.Number(), "hash", hash)
 			return
 		}
+		
+		// Priority Broadcasting. Prioritise the speaker and the one before.
+		if !pm.isSpeaker() && pm.isMiner() {
+
+			var (
+				firstSpeakerID  interface{} //Current speaker
+				secondSpeakerID interface{} //The next speaker if change view were to occur
+			)
+		
+			firstSpeakerID = pm.peerID[pm.pIndex];
+
+			log.Trace("Broadcasting block to speaker", "ID", firstSpeakerID.(string))
+			firstPeer := pm.peers.Peer(firstSpeakerID.(string))
+			if firstPeer != nil {
+				startElapased := mclock.Now()
+				firstPeer.SendNewBlock(block, td)
+				elapsed := calcElapsed(startElapased)
+				log.Trace("First broadcast succeeded", "elapsed", common.PrettyDuration(elapsed))
+			}
+
+			prevPIndex := (pm.pIndex + uint64(len(pm.peerID)) - 1) % uint64(len(pm.peerID))
+			secondSpeakerID = pm.peerID[prevPIndex]
+
+			log.Trace("Broadcasting block to previous speaker", "ID", secondSpeakerID.(string))
+			secondPeer := pm.peers.Peer(secondSpeakerID.(string))
+			if secondSpeakerID.(string) == pm.nodeID {
+				log.Trace("Local node, do not broadcast")
+			} else if secondPeer != nil {
+				startElapased := mclock.Now()
+				secondPeer.SendNewBlock(block, td)
+				elapsed := calcElapsed(startElapased)
+				log.Trace("Second transferring succeeded", "elapsed", common.PrettyDuration(elapsed))
+			}
+			log.Trace("Finished priority sending")
+
+			// Remove first and second speaker from peers
+			for k, v := range peers {
+				if v.id == firstSpeakerID.(string) {
+					peers = append(peers[:k], peers[k+1:]...)
+					break
+				}
+			}
+			for k, v := range peers {
+				if v.id == secondSpeakerID.(string) {
+					peers = append(peers[:k], peers[k+1:]...)
+					break
+				}
+			}
+		}
+
 		// Send the block to a subset of our peers
 		transfer := peers[:int(math.Sqrt(float64(len(peers))))]
+		startElapased := mclock.Now()
 		for _, peer := range transfer {
-			peer.AsyncSendNewBlock(block, td)
+			peer.SendNewBlock(block, td)
 		}
+		elapsed := calcElapsed(startElapased)
+		log.Info("All broadcasting to nodes finished", "elapsed", common.PrettyDuration(elapsed))
 		log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 		return
 	}
-	// Otherwise if the block is indeed in out own chain, announce it
+	// Otherwise if the block is indeed in our own chain, announce it
 	if pm.blockchain.HasBlock(hash, block.NumberU64()) {
 		for _, peer := range peers {
-			peer.AsyncSendNewBlockHash(block)
+			peer.SendNewBlockHashes([]common.Hash{hash}, []uint64{block.NumberU64()})
 		}
 		log.Trace("Announced block", "hash", hash, "recipients", len(peers), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 	}
 }
 
-// BroadcastTxs will propagate a batch of transactions to all peers which are not known to
+// BroadcastTx will propagate a transaction to all peers which are not known to
 // already have the given transaction.
-func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
-	var txset = make(map[*peer]types.Transactions)
+func (pm *ProtocolManager) BroadcastTx(hash common.Hash, tx *types.Transaction) {
+	// Broadcast transaction to a batch of peers not knowing about it
+	peers := pm.peers.PeersWithoutTx(hash)
+	//FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
 
-	// Broadcast transactions to a batch of peers not knowing about it
-	for _, tx := range txs {
-		peers := pm.peers.PeersWithoutTx(tx.Hash())
-		for _, peer := range peers {
-			txset[peer] = append(txset[peer], tx)
+	for _, peer := range peers {
+		peer.SendTransactions(types.Transactions{tx})
+	}
+	log.Trace("Broadcast transaction", "hash", hash, "recipients", len(peers))
+}
+
+func (pm *ProtocolManager) BroadcastPreReq(preReq *dbft.PrepareRequest) {
+	if !pm.inRound {
+		log.Trace("Mining disabled. Don't broadcast")
+		return
+	}
+
+	targetPeerID := make([]interface{}, len(pm.peerID))
+	copy(targetPeerID, pm.peerID)
+	for k, v := range targetPeerID {
+		if v == pm.nodeID {
+			targetPeerID = append(targetPeerID[:k], targetPeerID[k+1:]...)
 		}
-		log.Trace("Broadcast transaction", "hash", tx.Hash(), "recipients", len(peers))
 	}
-	// FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
-	for peer, txs := range txset {
-		peer.AsyncSendTransactions(txs)
+	peers := make([]*peer, 0, len(targetPeerID))
+	var peerCount int
+	for _, v := range targetPeerID {
+		peers = append(peers, pm.peers.Peer(v.(string)))
 	}
+	for _, peer := range peers {
+		if peer != nil {
+			peer.SendPrepareReq(preReq)
+			peerCount += 1
+		}
+	}
+
+	log.Trace("Broadcast PrepareRequest", "hash", preReq.Header.Hash(), "recipients", peerCount)
+}
+
+func (pm *ProtocolManager) BroadcastPreResp(preResp *dbft.PrepareResponse) {
+	if !pm.inRound {
+		log.Trace("Mining disabled. Don't broadcast")
+		return
+	}
+
+	targetPeerID := make([]interface{}, len(pm.peerID))
+	copy(targetPeerID, pm.peerID)
+	for k, v := range targetPeerID {
+		if v == pm.nodeID {
+			targetPeerID = append(targetPeerID[:k], targetPeerID[k+1:]...)
+		}
+	}
+	peers := make([]*peer, 0, len(targetPeerID))
+	var peerCount int
+	for _, v := range targetPeerID {
+		peers = append(peers, pm.peers.Peer(v.(string)))
+	}
+	for _, peer := range peers {
+		if peer != nil {
+			peer.SendPrepareResp(preResp)
+			peerCount += 1
+		}
+	}
+	log.Trace("Broadcast PrepareResponse", "recipients", peerCount)
+}
+
+func (pm *ProtocolManager) BroadcastChangeV(changeV *dbft.ControlChangeV) {
+	if !pm.inRound {
+		log.Trace("Mining disabled. Don't broadcast")
+		return
+	}
+
+	targetPeerID := make([]interface{}, len(pm.peerID))
+	copy(targetPeerID, pm.peerID)
+	for k, v := range targetPeerID {
+		if v == pm.nodeID {
+			targetPeerID = append(targetPeerID[:k], targetPeerID[k+1:]...)
+		}
+	}
+	peers := make([]*peer, 0, len(targetPeerID))
+	var peerCount int
+	for _, v := range targetPeerID {
+		peers = append(peers, pm.peers.Peer(v.(string)))
+	}
+	for _, peer := range peers {
+		if peer != nil {
+			peer.SendChangeView(changeV)
+			peerCount += 1
+		}
+	}
+	log.Trace("Broadcast ChangeView", "newView", changeV.Get().ViewNew, "recipients", peerCount)
+}
+
+func (pm *ProtocolManager) SendTxRequest(txReq *dbft.ControlTxRequest) {
+	if !pm.inRound {
+		log.Trace("Mining disabled. Don't broadcast")
+		return
+	}
+
+	speakerID := pm.peerID[txReq.Get().PIndex]
+	peer := pm.peers.Peer(speakerID.(string))
+	if peer != nil {
+		peer.SendTxRequest(txReq)
+	}
+
+	// log.Trace("peerID", "0", pm.peerID[0].(string), "1", pm.peerID[1].(string), "2", pm.peerID[2].(string), "3", pm.peerID[3].(string))
+	log.Trace("Send SendTxRequest", "Height", txReq.Get().Height, "p", txReq.Get().PIndex, "i", txReq.Get().IIndex, "v", txReq.Get().VIndex)
+}
+
+func (pm *ProtocolManager) SendTxResponse(txResp *dbft.TxResponse) {
+	if !pm.inRound {
+		log.Trace("Mining disabled. Don't broadcast")
+		return
+	}
+
+	peerID := pm.peerID[txResp.IIndex]
+	peer := pm.peers.Peer(peerID.(string))
+	if peer != nil {
+		peer.SendTxResponse(txResp)
+	}
+
+	log.Trace("Send SendTxResponse", "i", txResp.IIndex, "count", len(txResp.Txs))
+}
+
+func (pm *ProtocolManager) BroadcastNewV(newV *dbft.ControlNewViewBroadCast) {
+	if !pm.inRound {
+		log.Trace("Mining disabled. Don't broadcast")
+	}
+
+	targetPeerID := make([]interface{}, len(pm.peerID))
+	copy(targetPeerID, pm.peerID)
+	for k, v := range targetPeerID {
+		if v == pm.nodeID {
+			targetPeerID = append(targetPeerID[:k], targetPeerID[k+1:]...)
+		}
+	}
+	peers := make([]*peer, 0, len(targetPeerID))
+	var peerCount int
+	for _, v := range targetPeerID {
+		peers = append(peers, pm.peers.Peer(v.(string)))
+	}
+	for _, peer := range peers {
+		if peer != nil {
+			if err := peer.SendNewV(newV); err != nil {
+				log.Error("SendNewV fails", "err", err)
+				break
+			}
+			peerCount += 1
+		}
+	}
+	log.Trace("Broadcast NewV", "newView", newV.GetNewV(), "recipients", peerCount)
 }
 
 // Mined broadcast loop
@@ -755,14 +1079,66 @@ func (pm *ProtocolManager) minedBroadcastLoop() {
 func (pm *ProtocolManager) txBroadcastLoop() {
 	for {
 		select {
-		case event := <-pm.txsCh:
-			pm.BroadcastTxs(event.Txs)
+		case event := <-pm.txCh:
+			pm.BroadcastTx(event.Tx.Hash(), event.Tx)
 
 		// Err() channel will be closed when unsubscribing.
-		case <-pm.txsSub.Err():
+		case <-pm.txSub.Err():
 			return
 		}
 	}
+}
+
+func (pm *ProtocolManager) dbftLoop() {
+	// Consensus Engine fetch txpool first
+	go pm.eventMux.Post(dbft.GetTxPoolEvent{pm.getTxPool()})
+	// automatically stops if unsubscribe
+	for obj := range pm.dbftSub.Chan() {
+		switch event := obj.Data.(type) {
+		case dbft.RoundStateEvent:
+			log.Trace("A RoundStateEvent has been received in local dbftLoop.")
+			pm.inRound = event.InRound
+			pm.view = event.View
+			pm.pIndex = event.PIndex
+			pm.iIndex = event.IIndex
+			miners := pm.blockchain.GetLastVote()
+			pm.peerID = dbft.AddrListToNodeList(pm.addrToNodeID, miners)
+			// log.Trace("peerID", "0", pm.peerID[0].(string), "1", pm.peerID[1].(string), "2", pm.peerID[2].(string), "3", pm.peerID[3].(string))
+		case dbft.PrepareReqEvent:
+			log.Trace("A prepareReqEvent has been received in local dbftLoop to be sent out.")
+			pm.BroadcastPreReq(event.PreReq)
+		case dbft.PrepareRespEvent:
+			log.Trace("A prepareRespEvent has been received in local dbftLoop to be sent out.")
+			pm.BroadcastPreResp(event.PreResp)
+		case dbft.ChangeViewEvent:
+			log.Trace("A changeViewEvent has been received in local dbftLoop to be sent out.")
+			pm.BroadcastChangeV(event.ChangeV)
+		case dbft.AdvertToNewViewEvent:
+			log.Trace("A AdvertToNewViewEvent has been received in local dbftLoop to be sent out.")
+			pm.BroadcastNewV(event.ViewNew)
+		case dbft.SendTxReqEvent:
+			log.Trace("A SendTxReqEvent has been received in local dbftLoop to be sent out.")
+			pm.SendTxRequest(event.TxReq)
+		case dbft.SendTxRespEvent:
+			log.Trace("A SendTxRespEvent has been received in local dbftLoop to be sent out.")
+			pm.SendTxResponse(event.TxResp)
+		}
+	}
+}
+
+func (pm *ProtocolManager) getTxPool() *core.TxPool {
+	return pm.txpool
+}
+
+func (pm *ProtocolManager) txFromMiners(tx *types.Transaction, addrlist map[common.Address]uint64, signer types.Signer) bool {
+	checkExist := func(addr common.Address, list map[common.Address]uint64) bool {
+		_, exist := list[addr]
+		return exist
+	}
+	if addr, err := types.Sender(signer, tx); err == nil {
+		return checkExist(addr, addrlist)
+	}
+	return false
 }
 
 // NodeInfo represents a short summary of the Ethereum sub-protocol metadata
@@ -779,10 +1155,39 @@ type NodeInfo struct {
 func (pm *ProtocolManager) NodeInfo() *NodeInfo {
 	currentBlock := pm.blockchain.CurrentBlock()
 	return &NodeInfo{
-		Network:    pm.networkID,
+		Network:    pm.networkId,
 		Difficulty: pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64()),
 		Genesis:    pm.blockchain.Genesis().Hash(),
 		Config:     pm.blockchain.Config(),
 		Head:       currentBlock.Hash(),
 	}
 }
+
+
+func (pm *ProtocolManager) isMiner() bool {
+	for _, peerID := range pm.peerID {
+		if pm.nodeID == peerID {
+			return true;
+		}
+	}
+	return false;
+}
+
+func (pm *ProtocolManager) isSpeaker() bool {
+	return pm.pIndex == pm.iIndex
+}
+
+func (pm *ProtocolManager) priorPIndex() uint64 {
+	pIndex := pm.pIndex
+	miners := pm.blockchain.GetLastVote()
+	pIndex += uint64(len(miners)) - 1
+	pIndex %= uint64(len(miners))
+	return pIndex
+}
+
+
+
+
+
+
+

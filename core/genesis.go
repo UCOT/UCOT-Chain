@@ -54,8 +54,6 @@ type Genesis struct {
 	Mixhash    common.Hash         `json:"mixHash"`
 	Coinbase   common.Address      `json:"coinbase"`
 	Alloc      GenesisAlloc        `json:"alloc"      gencodec:"required"`
-	CoinAge    []byte              `json:"coinAge"` //***
-	CoinMined  []byte              `json:"coinMined"` //***
 
 	// These fields are used for consensus tests. Please don't use them
 	// in actual genesis blocks.
@@ -97,8 +95,6 @@ type genesisSpecMarshaling struct {
 	GasUsed    math.HexOrDecimal64
 	Number     math.HexOrDecimal64
 	Difficulty *math.HexOrDecimal256
-	CoinAge    hexutil.Bytes //***
-	CoinMined  hexutil.Bytes //***
 	Alloc      map[common.UnprefixedAddress]GenesisAccount
 }
 
@@ -250,8 +246,6 @@ func (g *Genesis) ToBlock(db ethdb.Database) *types.Block {
 		MixDigest:  g.Mixhash,
 		Coinbase:   g.Coinbase,
 		Root:       root,
-		CoinAge:    g.CoinAge, //***
-		CoinMined:  g.CoinMined, //***
 	}
 	if g.GasLimit == 0 {
 		head.GasLimit = params.GenesisGasLimit
@@ -262,7 +256,7 @@ func (g *Genesis) ToBlock(db ethdb.Database) *types.Block {
 	statedb.Commit(false)
 	statedb.Database().TrieDB().Commit(root, true)
 
-	return types.NewBlock(head, nil, nil, nil)
+	return types.NewBlock(head, nil, nil, nil, nil)
 }
 
 // Commit writes the block and state of a genesis specification to the database.

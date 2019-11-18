@@ -27,32 +27,29 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/trie"
-
-	//"github.com/ethereum/go-ethereum/log"
 )
 
-func NewState(ctx context.Context, head *types.Header, odr OdrBackend, wantLock bool) *state.StateDB {
-	state, _ := state.New(head.Root, NewStateDatabase(ctx, head, odr, wantLock))
+func NewState(ctx context.Context, head *types.Header, odr OdrBackend) *state.StateDB {
+	state, _ := state.New(head.Root, NewStateDatabase(ctx, head, odr))
 	return state
 }
 
-func NewStateDatabase(ctx context.Context, head *types.Header, odr OdrBackend, wantLock bool) state.Database {
-	return &odrDatabase{ctx, StateTrieID(head), odr, wantLock}
+func NewStateDatabase(ctx context.Context, head *types.Header, odr OdrBackend) state.Database {
+	return &odrDatabase{ctx, StateTrieID(head), odr}
 }
 
 type odrDatabase struct {
 	ctx     context.Context
 	id      *TrieID
 	backend OdrBackend
-	wantLock bool
 }
 
 func (db *odrDatabase) OpenTrie(root common.Hash) (state.Trie, error) {
-	return &odrTrie{db: db, id: db.id, wantLock: db.wantLock}, nil
+	return &odrTrie{db: db, id: db.id}, nil
 }
 
 func (db *odrDatabase) OpenStorageTrie(addrHash, root common.Hash) (state.Trie, error) {
-	return &odrTrie{db: db, id: StorageTrieID(db.id, addrHash, root), wantLock: db.wantLock}, nil
+	return &odrTrie{db: db, id: StorageTrieID(db.id, addrHash, root)}, nil
 }
 
 func (db *odrDatabase) CopyTrie(t state.Trie) state.Trie {
@@ -96,16 +93,15 @@ type odrTrie struct {
 	db   *odrDatabase
 	id   *TrieID
 	trie *trie.Trie
-	wantLock bool
 }
 
 func (t *odrTrie) TryGet(key []byte) ([]byte, error) {
 	key = crypto.Keccak256(key)
 	var res []byte
 	err := t.do(key, func() (err error) {
-		res, err = t.trie.TryGet(key)		
+		res, err = t.trie.TryGet(key)
 		return err
-	}, t.wantLock)
+	})
 	return res, err
 }
 
@@ -113,14 +109,14 @@ func (t *odrTrie) TryUpdate(key, value []byte) error {
 	key = crypto.Keccak256(key)
 	return t.do(key, func() error {
 		return t.trie.TryDelete(key)
-	}, t.wantLock)
+	})
 }
 
 func (t *odrTrie) TryDelete(key []byte) error {
 	key = crypto.Keccak256(key)
 	return t.do(key, func() error {
 		return t.trie.TryDelete(key)
-	}, t.wantLock)
+	})
 }
 
 func (t *odrTrie) Commit(onleaf trie.LeafCallback) (common.Hash, error) {
@@ -151,7 +147,7 @@ func (t *odrTrie) Prove(key []byte, fromLevel uint, proofDb ethdb.Putter) error 
 
 // do tries and retries to execute a function until it returns with no error or
 // an error type other than MissingNodeError
-func (t *odrTrie) do(key []byte, fn func() error, wantLock bool) error {
+func (t *odrTrie) do(key []byte, fn func() error) error {
 	for {
 		var err error
 		if t.trie == nil {
@@ -163,7 +159,7 @@ func (t *odrTrie) do(key []byte, fn func() error, wantLock bool) error {
 		if _, ok := err.(*trie.MissingNodeError); !ok {
 			return err
 		}
-		r := &TrieRequest{Id: t.id, Key: key, WantLock: wantLock}
+		r := &TrieRequest{Id: t.id, Key: key}
 		if err := t.db.backend.Retrieve(t.db.ctx, r); err != nil {
 			return err
 		}

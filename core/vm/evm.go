@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	// "github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/crypto"
+	// "github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -31,10 +33,8 @@ import (
 var emptyCodeHash = crypto.Keccak256Hash(nil)
 
 type (
-	// CanTransferFunc is the signature of a transfer guard function
 	CanTransferFunc func(StateDB, common.Address, *big.Int) bool
-	// TransferFunc is the signature of a transfer function
-	TransferFunc func(StateDB, common.Address, common.Address, *big.Int)
+	TransferFunc    func(StateDB, common.Address, common.Address, *big.Int)
 	// GetHashFunc returns the nth block hash in the blockchain
 	// and is used by the BLOCKHASH EVM op code.
 	GetHashFunc func(uint64) common.Hash
@@ -175,7 +175,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
-	contract := NewContract(caller, to, value, gas)
+	contract := NewContract(caller, to, value, gas) // Give infinite gas
 	contract.SetCallCode(&addr, evm.StateDB.GetCodeHash(addr), evm.StateDB.GetCode(addr))
 
 	start := time.Now()
@@ -188,15 +188,18 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			evm.vmConfig.Tracer.CaptureEnd(ret, gas-contract.Gas, time.Since(start), err)
 		}()
 	}
+
+	// t0 := mclock.Now()
 	ret, err = run(evm, contract, input)
+	// log.Trace("Time to execute contract call", "time", common.PrettyDuration(time.Duration(mclock.Now())-time.Duration(t0)))
 
 	// When an error was returned by the EVM or when setting the creation code
 	// above we revert to the snapshot and consume any gas remaining. Additionally
 	// when we're in homestead this also counts for code storage gas errors.
 	if err != nil {
-		evm.StateDB.RevertToSnapshot(snapshot)
+	  	evm.StateDB.RevertToSnapshot(snapshot)
 		if err != errExecutionReverted {
-			contract.UseGas(contract.Gas)
+		  	contract.UseGas(contract.Gas)
 		}
 	}
 	return ret, contract.Gas, err

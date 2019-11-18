@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// *** denotes the UCOT dedicated code
-
 package core
 
 import (
@@ -27,24 +25,23 @@ import (
 	mrand "math/rand"
 	"sync/atomic"
 	"time"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/hashicorp/golang-lru"
-	"github.com/ethereum/go-ethereum/core/state"
 )
 
 const (
 	headerCacheLimit = 512
 	tdCacheLimit     = 1024
 	numberCacheLimit = 2048
-	tokenCacheLimit  = 1024 //***
 )
 
 // HeaderChain implements the basic block header chain logic that is shared by
@@ -64,19 +61,11 @@ type HeaderChain struct {
 	headerCache *lru.Cache // Cache for the most recent block headers
 	tdCache     *lru.Cache // Cache for the most recent block total difficulties
 	numberCache *lru.Cache // Cache for the most recent block numbers
-	tokenCache  *lru.Cache // Cache for the most recent block total token balance ***
-	//recentCoinbaseCache *lru.Cache // Cache for the block height of each address being the coinbase ***
 
 	procInterrupt func() bool
 
 	rand   *mrand.Rand
 	engine consensus.Engine
-
-	// UCOT Dedicated ***
-	sealCounter int 
-	odrFetchCh chan<- int // setCh from lightchain 
-	errCh chan error
-	wg sync.WaitGroup
 }
 
 // NewHeaderChain creates a new HeaderChain structure.
@@ -87,9 +76,6 @@ func NewHeaderChain(chainDb ethdb.Database, config *params.ChainConfig, engine c
 	headerCache, _ := lru.New(headerCacheLimit)
 	tdCache, _ := lru.New(tdCacheLimit)
 	numberCache, _ := lru.New(numberCacheLimit)
-	tokenCache, _ := lru.New(tokenCacheLimit) // ***
-	//recentCoinbaseCache, _ := lru.New(MostRecentCoinbase) // ***
-
 
 	// Seed a fast but crypto originating random generator
 	seed, err := crand.Int(crand.Reader, big.NewInt(math.MaxInt64))
@@ -106,9 +92,6 @@ func NewHeaderChain(chainDb ethdb.Database, config *params.ChainConfig, engine c
 		procInterrupt: procInterrupt,
 		rand:          mrand.New(mrand.NewSource(seed.Int64())),
 		engine:        engine,
-		errCh:         make(chan error), // ***
-		tokenCache:    tokenCache, // ***
-		//recentCoinbaseCache: recentCoinbaseCache, // ***
 	}
 
 	hc.genesisHeader = hc.GetHeaderByNumber(0)
@@ -175,15 +158,13 @@ func (hc *HeaderChain) WriteHeader(header *types.Header) (status WriteStatus, er
 	// Please refer to http://www.cs.cornell.edu/~ie53/publications/btcProcFC.pdf
 	if externTd.Cmp(localTd) > 0 || (externTd.Cmp(localTd) == 0 && mrand.Float64() < 0.5) {
 		// Delete any canonical number assignments above the new head
-		batch := hc.chainDb.NewBatch()
 		for i := number + 1; ; i++ {
 			hash := rawdb.ReadCanonicalHash(hc.chainDb, i)
 			if hash == (common.Hash{}) {
 				break
 			}
-			rawdb.DeleteCanonicalHash(batch, i)
+			rawdb.DeleteCanonicalHash(hc.chainDb, i)
 		}
-		batch.Write()
 		// Overwrite any stale canonical number assignments
 		var (
 			headHash   = header.ParentHash
@@ -211,8 +192,6 @@ func (hc *HeaderChain) WriteHeader(header *types.Header) (status WriteStatus, er
 
 	hc.headerCache.Add(hash, header)
 	hc.numberCache.Add(hash, number)
-	// Cache the coinbase ***
-	//hc.recentCoinbaseCache.Add(header.Coinbase, header.Number.Uint64())
 
 	return
 }
@@ -224,7 +203,7 @@ func (hc *HeaderChain) WriteHeader(header *types.Header) (status WriteStatus, er
 // header writes should be protected by the parent chain mutex individually.
 type WhCallback func(*types.Header) error
 
-func (hc *HeaderChain) ValidateHeaderChain(chain []*types.Header, checkFreq int, isLight bool) (int, error) {
+func (hc *HeaderChain) ValidateHeaderChain(chain []*types.Header, checkFreq int) (int, error) {
 	// Do a sanity check that the provided chain is actually ordered and linked
 	for i := 1; i < len(chain); i++ {
 		if chain[i].Number.Uint64() != chain[i-1].Number.Uint64()+1 || chain[i].ParentHash != chain[i-1].Hash() {
@@ -246,77 +225,7 @@ func (hc *HeaderChain) ValidateHeaderChain(chain []*types.Header, checkFreq int,
 		}
 		seals[index] = true
 	}
-	if hc.sealCounter + len(chain) >= 100 { // refering to eth/downloader/downloader.go fsHeaderCheckFrequency
-		seals[len(seals)-1] = true // Last should always be verified to avoid junk
-		hc.sealCounter = 0 // Reset
-	}
-	
-	// Need to be checked ***
-	if isLight && len(seals) > 0 {
-		type errorsWithIndex struct {
-			index int
-			err error
-		}
-		var (
-			count int
-			indexes = make([]int, 0, len(seals))
-			waitErrors = func(wg *sync.WaitGroup, errs chan errorsWithIndex) (bool, int, error) {
-				c := make(chan struct{})
-				go func() {
-					defer close(c)
-					wg.Wait()
-				}()
-				for {
-					select {
-					case <- c:
-						return true, 0, nil
-					case err := <- errs:
-						if err.err != nil {
-							return false, err.index, err.err
-						}
-						break
-					}
-				}
-			}
-		)
-		for index, check := range seals {
-			if check {
-				// count += 1
-				indexes = append(indexes, index)
-			}
-		}
-		hc.sealCounter += len(indexes) // accumulating the counter
-		hc.wg.Add(len(indexes))
-		var errors = make(chan errorsWithIndex, len(indexes))
-		go func() {
-			for err := range hc.errCh {
-				count += 1
-				errEach := errorsWithIndex{
-					index: count,
-					err: err,
-				}
-				errors <- errEach
-				hc.wg.Done()
-				if count == len(indexes) {
-					return
-				}	
-			}
-		}()	
-
-		for _, index := range indexes {	
-			hc.odrFetchCh <- index // light/lightchain.go
-			// hc.wg.Add(1)
-		}
-		// hc.wg.Wait()
-		// for i, _ := range indexes {
-		// 	if err := <-errors; err != nil {
-		// 		return i, err
-		// 	}
-		// }
-		if ok, i, err := waitErrors(&hc.wg, errors); !ok {
-			return i, err
-		}
-	}
+	seals[len(seals)-1] = true // Last should always be verified to avoid junk
 
 	abort, results := hc.engine.VerifyHeaders(hc, chain, seals)
 	defer close(abort)
@@ -400,43 +309,6 @@ func (hc *HeaderChain) GetBlockHashesFromHash(hash common.Hash, max uint64) []co
 	return chain
 }
 
-// GetAncestor retrieves the Nth ancestor of a given block. It assumes that either the given block or
-// a close ancestor of it is canonical. maxNonCanonical points to a downwards counter limiting the
-// number of blocks to be individually checked before we reach the canonical chain.
-//
-// Note: ancestor == 0 returns the same block, 1 returns its parent and so on.
-func (hc *HeaderChain) GetAncestor(hash common.Hash, number, ancestor uint64, maxNonCanonical *uint64) (common.Hash, uint64) {
-	if ancestor > number {
-		return common.Hash{}, 0
-	}
-	if ancestor == 1 {
-		// in this case it is cheaper to just read the header
-		if header := hc.GetHeader(hash, number); header != nil {
-			return header.ParentHash, number - 1
-		} else {
-			return common.Hash{}, 0
-		}
-	}
-	for ancestor != 0 {
-		if rawdb.ReadCanonicalHash(hc.chainDb, number) == hash {
-			number -= ancestor
-			return rawdb.ReadCanonicalHash(hc.chainDb, number), number
-		}
-		if *maxNonCanonical == 0 {
-			return common.Hash{}, 0
-		}
-		*maxNonCanonical--
-		ancestor--
-		header := hc.GetHeader(hash, number)
-		if header == nil {
-			return common.Hash{}, 0
-		}
-		hash = header.ParentHash
-		number--
-	}
-	return hash, number
-}
-
 // GetTd retrieves a block's total difficulty in the canonical chain from the
 // database by hash and number, caching it if found.
 func (hc *HeaderChain) GetTd(hash common.Hash, number uint64) *big.Int {
@@ -468,40 +340,6 @@ func (hc *HeaderChain) GetTdByHash(hash common.Hash) *big.Int {
 func (hc *HeaderChain) WriteTd(hash common.Hash, number uint64, td *big.Int) error {
 	rawdb.WriteTd(hc.chainDb, hash, number, td)
 	hc.tdCache.Add(hash, new(big.Int).Set(td))
-	return nil
-}
-
-// GetTokenBalance retrieves a block's total token balance in the canonical chain from the
-// database by hash and number, caching it if found.
-func (hc *HeaderChain) GetTokenBalance(hash common.Hash, number uint64) *big.Int {
-	// Short circuit if the token balance's already in the cache, retrieve otherwise
-	if cached, ok := hc.tokenCache.Get(hash); ok {
-		return cached.(*big.Int)
-	}
-	token := rawdb.ReadTokenBalance(hc.chainDb, hash, number)
-	if token == nil {
-		return nil
-	}
-	// Cache the found body for next time and return
-	hc.tokenCache.Add(hash, token)
-	return token
-}
-
-// GetTokenBalanceByHash retrieves a block's total token balance in the canonical chain from the
-// database by hash, caching it if found.
-func (hc *HeaderChain) GetTokenBalanceByHash(hash common.Hash) *big.Int {
-	number := hc.GetBlockNumber(hash)
-	if number == nil {
-		return nil
-	}
-	return hc.GetTokenBalance(hash, *number)
-}
-
-// WriteTokenBalance stores a block's total token balance into the database, also caching it
-// along the way.
-func (hc *HeaderChain) WriteTokenBalance(hash common.Hash, number uint64, token *big.Int) error {
-	rawdb.WriteTokenBalance(hc.chainDb, hash, number, token)
-	hc.tokenCache.Add(hash, new(big.Int).Set(token))
 	return nil
 }
 
@@ -565,7 +403,7 @@ func (hc *HeaderChain) SetCurrentHeader(head *types.Header) {
 
 // DeleteCallback is a callback function that is called by SetHead before
 // each header is deleted.
-type DeleteCallback func(rawdb.DatabaseDeleter, common.Hash, uint64)
+type DeleteCallback func(common.Hash, uint64)
 
 // SetHead rewinds the local chain to a new head. Everything above the new head
 // will be deleted and the new one set.
@@ -575,29 +413,26 @@ func (hc *HeaderChain) SetHead(head uint64, delFn DeleteCallback) {
 	if hdr := hc.CurrentHeader(); hdr != nil {
 		height = hdr.Number.Uint64()
 	}
-	batch := hc.chainDb.NewBatch()
+
 	for hdr := hc.CurrentHeader(); hdr != nil && hdr.Number.Uint64() > head; hdr = hc.CurrentHeader() {
 		hash := hdr.Hash()
 		num := hdr.Number.Uint64()
 		if delFn != nil {
-			delFn(batch, hash, num)
+			delFn(hash, num)
 		}
-		rawdb.DeleteHeader(batch, hash, num)
-		rawdb.DeleteTd(batch, hash, num)
-		rawdb.DeleteTokenBalance(batch, hash, num) //***
+		rawdb.DeleteHeader(hc.chainDb, hash, num)
+		rawdb.DeleteTd(hc.chainDb, hash, num)
 
 		hc.currentHeader.Store(hc.GetHeader(hdr.ParentHash, hdr.Number.Uint64()-1))
 	}
 	// Roll back the canonical chain numbering
 	for i := height; i > head; i-- {
-		rawdb.DeleteCanonicalHash(batch, i)
+		rawdb.DeleteCanonicalHash(hc.chainDb, i)
 	}
 	// Clear out any stale content from the caches
 	hc.headerCache.Purge()
 	hc.tdCache.Purge()
 	hc.numberCache.Purge()
-	hc.tokenCache.Purge()
-	//hc.recentCoinbaseCache.Purge() //***
 
 	if hc.CurrentHeader() == nil {
 		hc.currentHeader.Store(hc.genesisHeader)
@@ -624,107 +459,26 @@ func (hc *HeaderChain) GetBlock(hash common.Hash, number uint64) *types.Block {
 	return nil
 }
 
-// The following is all UCOT Dedicated ***
-func (hc *HeaderChain) GetChainDb() ethdb.Database {
-	return hc.chainDb
-}
-
-func (hc *HeaderChain) SetOdrFetchCh(ch chan<- int) { hc.odrFetchCh = ch }
-
-// TODO. GetPastBalance returns nothing, only for implement ChainStateReader in consensus/consensus.go. ***
-func (hc *HeaderChain) GetPastBalance(parent_state *state.StateDB, header *types.Header) *big.Int {
-	return nil
-}
-
+// StateAt returns nothing, only for implement ChainStateReader in consensus/consensus.go.
 func (hc *HeaderChain) StateAt(root common.Hash) (*state.StateDB, error) {
 	return nil, nil
 }
 
-func (hc *HeaderChain) GetErrorsCh() (chan error) {
-	return hc.errCh
+// Validator returns nothing, only for implement ChainStateReader in consensus/consensus.go.
+func (hc *HeaderChain) ValidatorDBFT() consensus.Validator {
+	return nil
 }
 
-// GetRecentCoinbase retrieves the most recent header that a given address being the coinbase ***
-func (hc *HeaderChain) GetRecentCoinbase(header *types.Header, ancestors_pos []*types.Header, uncle bool) uint64 {
-	address := header.Coinbase
-	// if cached, ok := hc.recentCoinbaseCache.Get(address); ok {
-	// 	height := cached.(uint64)
-	// 	return height
-	// }
-	if ancestors_pos != nil { // for validation at receivers, in VerifySeal()
-		for _, ancestor := range ancestors_pos {
-			if address == ancestor.Coinbase {
-				//hc.recentCoinbaseCache.Add(ancestor.Coinbase, ancestor.Number.Uint64())
-				return ancestor.Number.Uint64()
-			}
-		}
-	} else {
-		var parent *types.Header
-		// current := hc.CurrentHeader()
-		if header.Number.Uint64() < MiningLogAtDepth {
-			parent = hc.GetHeaderByNumber(0)
-		} else {
-			if uncle {
-				parent = types.CopyHeader(header)
-				for i := 0; i < MiningLogAtDepth; i++ {
-					parent = hc.GetHeader(parent.ParentHash, parent.Number.Uint64()-1)
-				}
-			} else {
-				parent = hc.GetHeaderByNumber(header.Number.Uint64()-MiningLogAtDepth)
-			}
-		}
-		for ; header.Number.Uint64()-parent.Number.Uint64() < CoinbaseSearchingLimit+MiningLogAtDepth && parent.Number.Uint64() >= 0; parent = hc.GetHeader(parent.ParentHash, parent.Number.Uint64()-1) {
-			if address == parent.Coinbase {
-				//hc.recentCoinbaseCache.Add(current.Coinbase, current.Number.Uint64())
-				return parent.Number.Uint64()
-			}
-			if parent.Number.Uint64() == 0 {
-				break
-			}
-		}
-	}
-	return math.MaxUint64
+// Processor returns nothing, only for implement ChainStateReader in consensus/consensus.go.
+func (hc *HeaderChain) ProcessorDBFT() consensus.Processor {
+	return nil
 }
 
-// GetCoinAge retrieves the coinAge of a given address in the past 512 headers ***
-func (hc *HeaderChain) GetCoinAge(header *types.Header) float64 {
-	var (
-		division = big.NewInt(100) // percentile
-		age = new(big.Int).SetBytes(header.CoinAge)
-		percentage = new(big.Int).Mul(age, division)
-	)
-	switch {
-	case header.Number.Uint64() < MiningLogAtDepth:
-		var (
-			total        = new(big.Int).Set(params.TokenTotal)
-			prerequisite = new(big.Int)
-		)
-		if age.Cmp(prerequisite.Div(total, big.NewInt(100000))) < 0 { // 0.001%
-			percentage.SetInt64(-1)
-		} else {
-			percentage.Div(percentage, total)
-		}
-	case header.Number.Uint64() < CoinAgeWindow+MiningLogAtDepth-1:
-		var (
-			total = new(big.Int).Mul(params.TokenTotal, big.NewInt(header.Number.Int64()-MiningLogAtDepth+1))
-			prerequisite = new(big.Int)
-		)
-		if age.Cmp(prerequisite.Div(total, big.NewInt(100000))) < 0 { 
-			percentage.SetInt64(-1)
-		} else {
-			percentage.Div(percentage, total)
-		}
-	default:
-		var (
-			total = new(big.Int).Mul(params.TokenTotal, big.NewInt(CoinAgeWindow))
-			prerequisite = new(big.Int)
-		)
-		if age.Cmp(prerequisite.Div(total, big.NewInt(100000))) < 0 {
-			percentage.SetInt64(-1)
-		} else {
-			percentage.Div(percentage, total)
-		}
-	}
-	coinAge := params.GetCoinAgeClasses(float64(percentage.Int64()))
-	return coinAge
+//TODO
+func (hc *HeaderChain) GetGroupSigRLP(hash common.Hash) (rlp.RawValue, error) {
+	return nil, nil
+}
+
+func (hc *HeaderChain) GetLastVote(number ...uint64) []common.Address {
+	return nil
 }

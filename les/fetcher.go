@@ -15,9 +15,6 @@
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
 // Package les implements the Light Ethereum Subprotocol.
-
-// *** denotes the UCOT dedicated code
-
 package les
 
 import (
@@ -270,16 +267,9 @@ func (f *lightFetcher) announce(p *peer, head *announceData) {
 		}
 		n = n.parent
 	}
-	// n is now the reorg common ancestor, add a new branch of nodes
-	if n != nil && (head.Number >= n.number+maxNodeCount || head.Number <= n.number) {
-		// if announced head block height is lower or same as n or too far from it to add
-		// intermediate nodes then discard previous announcement info and trigger a resync
-		n = nil
-		fp.nodeCnt = 0
-		fp.nodeByHash = make(map[common.Hash]*fetcherTreeNode)
-	}
 	if n != nil {
-		// check if the node count is too high to add new nodes, discard oldest ones if necessary
+		// n is now the reorg common ancestor, add a new branch of nodes
+		// check if the node count is too high to add new nodes
 		locked := false
 		for uint64(fp.nodeCnt)+head.Number-n.number > maxNodeCount && fp.root != nil {
 			if !locked {
@@ -354,10 +344,8 @@ func (f *lightFetcher) peerHasBlock(p *peer, hash common.Hash, number uint64, wa
 	defer func() {
 		if wantLock {
 			f.lock.Unlock()
-		}	
+		}
 	}()
-	// f.lock.Lock()
-	// defer f.lock.Unlock()
 
 	if f.syncing {
 		// always return true when syncing
@@ -522,7 +510,7 @@ func (f *lightFetcher) processResponse(req fetchRequest, resp fetchResponse) boo
 	for i, header := range resp.headers {
 		headers[int(req.amount)-1-i] = header
 	}
-	if _, err := f.chain.InsertHeaderChain(headers, 100); err != nil { // *** make freq = 100 instead of 1
+	if _, err := f.chain.InsertHeaderChain(headers, 1); err != nil {
 		if err == consensus.ErrFutureBlock {
 			return true
 		}

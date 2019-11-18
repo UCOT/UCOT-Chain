@@ -236,6 +236,19 @@ func (p *peer) SendTxStatus(reqID, bv uint64, stats []txStatus) error {
 	return sendResponse(p.rw, TxStatusMsg, reqID, bv, stats)
 }
 
+// SendBlockGroupSigRLP sends a batch of block groupSig to the remote peer from
+// an already RLP encoded format.
+func (p *peer) SendBlockGroupSigRLP(reqID, bv uint64, sigs []rlp.RawValue) error {
+	return sendResponse(p.rw, GroupSigMsg, reqID, bv, sigs)
+}
+
+// RequestGroupSig fetches a batch of blocks' groupSig corresponding to the hashes
+// specified.
+func (p *peer) RequestGroupSig(reqID, cost uint64, hashes []common.Hash) error {
+	p.Log().Debug("Fetching batch of block groupSig", "count", len(hashes))
+	return sendRequest(p.rw, GetGroupSigMsg, reqID, cost, hashes)
+}
+
 // RequestHeadersByHash fetches a batch of blocks' headers corresponding to the
 // specified header query, based on the hash of an origin block.
 func (p *peer) RequestHeadersByHash(reqID, cost uint64, origin common.Hash, amount int, skip int, reverse bool) error {

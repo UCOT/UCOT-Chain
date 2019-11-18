@@ -20,8 +20,11 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	// "time"
 
 	"github.com/ethereum/go-ethereum/common"
+	// "github.com/ethereum/go-ethereum/common/mclock"
+	// "github.com/ethereum/go-ethereum/consensus/dbft"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
@@ -181,16 +184,24 @@ func (st *StateTransition) preCheck() error {
 // returning the result including the the used gas. It returns an error if it
 // failed. An error indicates a consensus issue.
 func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bool, err error) {
+	msg := st.msg
+	sender := vm.AccountRef(msg.From())
+	// TODO Cross-chain
+	// if addrInSlice(sender.Address(), GetLastVote) { // Notaries do not need to pay for the gas fee. need to limit the "to"
+	// 	st.gasPrice = big.NewInt(0)
+	// }
+	// t0 := mclock.Now()
 	if err = st.preCheck(); err != nil {
 		return
 	}
-	msg := st.msg
-	sender := vm.AccountRef(msg.From())
+	// log.Trace("  Time for preCheck", "time", common.PrettyDuration(time.Duration(mclock.Now())-time.Duration(t0)))
+
 	homestead := st.evm.ChainConfig().IsHomestead(st.evm.BlockNumber)
 	contractCreation := msg.To() == nil
 
 	// Pay intrinsic gas
 	gas, err := IntrinsicGas(st.data, contractCreation, homestead)
+	// log.Trace("Intrinsic Gas", "intrinsic_gas", gas)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -210,7 +221,9 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 	} else {
 		// Increment the nonce for the next transaction
 		st.state.SetNonce(msg.From(), st.state.GetNonce(sender.Address())+1)
+		// log.Error("Before evm.Call")
 		ret, st.gas, vmerr = evm.Call(sender, st.to(), st.data, st.gas, st.value)
+		// log.Error("After evm.Call", "err", vmerr)
 	}
 	if vmerr != nil {
 		log.Debug("VM returned with error", "err", vmerr)
@@ -223,7 +236,6 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 	}
 	st.refundGas()
 	st.state.AddBalance(st.evm.Coinbase, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
-
 	return ret, st.gasUsed(), vmerr != nil, err
 }
 
@@ -233,7 +245,8 @@ func (st *StateTransition) refundGas() {
 	if refund > st.state.GetRefund() {
 		refund = st.state.GetRefund()
 	}
-	st.gas += refund
+
+	st.gas += refund 
 
 	// Return ETH for remaining gas, exchanged at the original rate.
 	remaining := new(big.Int).Mul(new(big.Int).SetUint64(st.gas), st.gasPrice)
@@ -247,4 +260,13 @@ func (st *StateTransition) refundGas() {
 // gasUsed returns the amount of gas used up by the state transition.
 func (st *StateTransition) gasUsed() uint64 {
 	return st.initialGas - st.gas
+}
+
+func addrInSlice(addr common.Address, signerList []common.Address) bool {
+	for _, v := range signerList {
+		if v == addr {
+			return true
+		}
+	}
+	return false
 }

@@ -24,6 +24,8 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/dbft"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -35,16 +37,17 @@ import (
 )
 
 var (
-	errInvalidMessageType  = errors.New("invalid message type")
-	errInvalidEntryCount   = errors.New("invalid number of response entries")
-	errHeaderUnavailable   = errors.New("header unavailable")
-	errTxHashMismatch      = errors.New("transaction hash mismatch")
-	errUncleHashMismatch   = errors.New("uncle hash mismatch")
-	errReceiptHashMismatch = errors.New("receipt hash mismatch")
-	errDataHashMismatch    = errors.New("data hash mismatch")
-	errCHTHashMismatch     = errors.New("cht hash mismatch")
-	errCHTNumberMismatch   = errors.New("cht number mismatch")
-	errUselessNodes        = errors.New("useless nodes in merkle proof nodeset")
+	errInvalidMessageType   = errors.New("invalid message type")
+	errInvalidEntryCount    = errors.New("invalid number of response entries")
+	errHeaderUnavailable    = errors.New("header unavailable")
+	errTxHashMismatch       = errors.New("transaction hash mismatch")
+	errUncleHashMismatch    = errors.New("uncle hash mismatch")
+	errReceiptHashMismatch  = errors.New("receipt hash mismatch")
+	errDataHashMismatch     = errors.New("data hash mismatch")
+	errCHTHashMismatch      = errors.New("cht hash mismatch")
+	errCHTNumberMismatch    = errors.New("cht number mismatch")
+	errUselessNodes         = errors.New("useless nodes in merkle proof nodeset")
+	errGroupSigHashMismatch = errors.New("groupSig hash mismatch")
 )
 
 type LesOdrRequest interface {
@@ -68,9 +71,74 @@ func LesRequest(req light.OdrRequest) LesOdrRequest {
 		return (*ChtRequest)(r)
 	case *light.BloomRequest:
 		return (*BloomRequest)(r)
+	case *light.GroupSigRequest:
+		return (*GroupSigRequest)(r)
 	default:
 		return nil
 	}
+}
+
+// GroupSigRequest is the ODR request type for block groupSig
+type GroupSigRequest light.GroupSigRequest
+
+// GetCost returns the cost of the given ODR request according to the serving
+// peer's cost table (implementation of LesOdrRequest)
+func (r *GroupSigRequest) GetCost(peer *peer) uint64 {
+	return peer.GetRequestCost(GetGroupSigMsg, 1)
+}
+
+// CanSend tells if a certain peer is suitable for serving the given request
+func (r *GroupSigRequest) CanSend(peer *peer) bool {
+	peer.Log().Debug("CanSend Start", "peer", peer)
+	return peer.HasBlock(r.Hash, r.Number, false) // les/fetcher.go - peerHasBlock()
+}
+
+// Request sends an ODR request to the LES network (implementation of LesOdrRequest)
+func (r *GroupSigRequest) Request(reqID uint64, peer *peer) error {
+	peer.Log().Debug("Requesting block groupSig", "hash", r.Hash)
+	return peer.RequestGroupSig(reqID, r.GetCost(peer), []common.Hash{r.Hash})
+}
+
+// Valid processes an ODR request reply message from the LES network
+// returns true and stores results in memory if the message was a valid reply
+// to the request (implementation of LesOdrRequest)
+func (r *GroupSigRequest) Validate(db ethdb.Database, msg *Msg) error {
+	log.Debug("Validating block groupSig", "hash", r.Hash)
+
+	// Ensure we have a correct message with a single block groupSig
+	if msg.MsgType != MsgBlockGroupSig {
+		return errInvalidMessageType
+	}
+	sigs := msg.Obj.([]types.GroupSignatures)
+	if len(sigs) != 1 {
+		return errInvalidEntryCount
+	}
+	signature := sigs[0]
+
+	// Retrieve our stored header and validate block groupSig against it
+	header := r.Header
+	addrlist := dbft.AddressList()
+	var sigCount int
+	checkReplica := make(map[uint64]int64)
+	for _, sig := range signature {
+		if delegateAddr, _ := core.PubKeyrecover(dbft.EliminateSigningField(header), sig.Sig); delegateAddr != addrlist[int(sig.IIndex)] {
+			return fmt.Errorf("current block cannot pass the groupSig validation")
+		}
+		sigCount += 1
+	}
+	for _, count := range checkReplica {
+		if count != 1 {
+			return fmt.Errorf("Replicated Sigs exist")
+		}
+	}
+
+	if sigCount < (len(addrlist) - (len(addrlist)-1)/3) {
+		return fmt.Errorf("not enough signers to pass the groupSig validation")
+	}
+
+	// Validations passed,  return
+	r.GroupSig = signature
+	return nil
 }
 
 // BlockRequest is the ODR request type for block bodies
@@ -120,6 +188,30 @@ func (r *BlockRequest) Validate(db ethdb.Database, msg *Msg) error {
 	if header.UncleHash != types.CalcUncleHash(body.Uncles) {
 		return errUncleHashMismatch
 	}
+
+	// Checking groupSig.
+	addrlist := dbft.AddressList()
+	var sigCount int
+	checkReplica := make(map[uint64]int64)
+	for _, sig := range body.GroupSig {
+		if delegateAddr, _ := core.PubKeyrecover(dbft.EliminateSigningField(header), sig.Sig); delegateAddr != addrlist[int(sig.IIndex)] {
+			return fmt.Errorf("current block cannot pass the groupSig validation")
+		}
+		sigCount += 1
+	}
+	for _, count := range checkReplica {
+		if count != 1 {
+			return fmt.Errorf("Replicated Sigs exist")
+		}
+	}
+
+	if sigCount < (len(addrlist) - (len(addrlist)-1)/3) {
+		return fmt.Errorf("not enough signers to pass the groupSig validation")
+	}
+
+	// Eliminate groupSig, don't store
+	body.GroupSig = types.GroupSignatures{}
+
 	// Validations passed, encode and store RLP
 	data, err := rlp.EncodeToBytes(body)
 	if err != nil {
@@ -202,8 +294,7 @@ func (r *TrieRequest) GetCost(peer *peer) uint64 {
 
 // CanSend tells if a certain peer is suitable for serving the given request
 func (r *TrieRequest) CanSend(peer *peer) bool {
-	// log.Trace("check wantlock","wantlock", r.WantLock)
-	return peer.HasBlock(r.Id.BlockHash, r.Id.BlockNumber, r.WantLock)
+	return peer.HasBlock(r.Id.BlockHash, r.Id.BlockNumber, true)
 }
 
 // Request sends an ODR request to the LES network (implementation of LesOdrRequest)
@@ -222,6 +313,7 @@ func (r *TrieRequest) Request(reqID uint64, peer *peer) error {
 // to the request (implementation of LesOdrRequest)
 func (r *TrieRequest) Validate(db ethdb.Database, msg *Msg) error {
 	log.Debug("Validating trie proof", "root", r.Id.Root, "key", r.Key)
+
 	switch msg.MsgType {
 	case MsgProofsV1:
 		proofs := msg.Obj.([]light.NodeList)
@@ -230,7 +322,7 @@ func (r *TrieRequest) Validate(db ethdb.Database, msg *Msg) error {
 		}
 		nodeSet := proofs[0].NodeSet()
 		// Verify the proof and store if checks out
-		if _, _, err := trie.VerifyProof(r.Id.Root, r.Key, nodeSet); err != nil {
+		if _, err, _ := trie.VerifyProof(r.Id.Root, r.Key, nodeSet); err != nil {
 			return fmt.Errorf("merkle proof verification failed: %v", err)
 		}
 		r.Proof = nodeSet
@@ -241,7 +333,7 @@ func (r *TrieRequest) Validate(db ethdb.Database, msg *Msg) error {
 		// Verify the proof and store if checks out
 		nodeSet := proofs.NodeSet()
 		reads := &readTraceDB{db: nodeSet}
-		if _, _, err := trie.VerifyProof(r.Id.Root, r.Key, reads); err != nil {
+		if _, err, _ := trie.VerifyProof(r.Id.Root, r.Key, reads); err != nil {
 			return fmt.Errorf("merkle proof verification failed: %v", err)
 		}
 		// check if all nodes have been read by VerifyProof
@@ -400,7 +492,7 @@ func (r *ChtRequest) Validate(db ethdb.Database, msg *Msg) error {
 		var encNumber [8]byte
 		binary.BigEndian.PutUint64(encNumber[:], r.BlockNum)
 
-		value, _, err := trie.VerifyProof(r.ChtRoot, encNumber[:], light.NodeList(proof.Proof).NodeSet())
+		value, err, _ := trie.VerifyProof(r.ChtRoot, encNumber[:], light.NodeList(proof.Proof).NodeSet())
 		if err != nil {
 			return err
 		}
@@ -435,7 +527,7 @@ func (r *ChtRequest) Validate(db ethdb.Database, msg *Msg) error {
 		binary.BigEndian.PutUint64(encNumber[:], r.BlockNum)
 
 		reads := &readTraceDB{db: nodeSet}
-		value, _, err := trie.VerifyProof(r.ChtRoot, encNumber[:], reads)
+		value, err, _ := trie.VerifyProof(r.ChtRoot, encNumber[:], reads)
 		if err != nil {
 			return fmt.Errorf("merkle proof verification failed: %v", err)
 		}
@@ -529,7 +621,7 @@ func (r *BloomRequest) Validate(db ethdb.Database, msg *Msg) error {
 
 	for i, idx := range r.SectionIdxList {
 		binary.BigEndian.PutUint64(encNumber[2:], idx)
-		value, _, err := trie.VerifyProof(r.BloomTrieRoot, encNumber[:], reads)
+		value, err, _ := trie.VerifyProof(r.BloomTrieRoot, encNumber[:], reads)
 		if err != nil {
 			return err
 		}

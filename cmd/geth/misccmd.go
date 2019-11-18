@@ -112,7 +112,7 @@ func version(ctx *cli.Context) error {
 	if gitCommit != "" {
 		fmt.Println("Git Commit:", gitCommit)
 	}
-	fmt.Println("UCOT Token Version:", params.UcotVersion)
+	fmt.Println("UCOT Version:", params.UcotVersion)
 	fmt.Println("Architecture:", runtime.GOARCH)
 	fmt.Println("Protocol Versions:", eth.ProtocolVersions)
 	fmt.Println("Network Id:", eth.DefaultConfig.NetworkId)

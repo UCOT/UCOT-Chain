@@ -30,6 +30,7 @@ var Modules = map[string]string{
 	"shh":        Shh_JS,
 	"swarmfs":    SWARMFS_JS,
 	"txpool":     TxPool_JS,
+	"dbft":       DBFT_JS, //***
 }
 
 const Chequebook_JS = `
@@ -313,8 +314,8 @@ web3._extend({
 			params: 2
 		}),
 		new web3._extend.Method({
-			name: 'setMutexProfileFraction',
-			call: 'debug_setMutexProfileFraction',
+			name: 'setMutexProfileRate',
+			call: 'debug_setMutexProfileRate',
 			params: 1
 		}),
 		new web3._extend.Method({
@@ -627,6 +628,84 @@ web3._extend({
 				status.queued = web3._extend.utils.toDecimal(status.queued);
 				return status;
 			}
+		}),
+	]
+});
+`
+
+// ***
+const DBFT_JS = `
+web3._extend({
+	property: 'dbft',
+	methods: 
+	[
+		new web3._extend.Method({
+			name: 'getSnapshot',
+			call: 'dbft_getSnapshot',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'getSnapshotAtHash',
+			call: 'dbft_getSnapshotAtHash',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'getSigners',
+			call: 'dbft_getSigners',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'getSignersAtHash',
+			call: 'dbft_getSignersAtHash',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'getGroupSigsAtNumber',
+			call: 'dbft_getGroupSigsAtNumber',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'getGroupSigsAtHash',
+			call: 'dbft_getGroupSigsAtHash',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'updateVote',
+			call: 'dbft_updateVote',
+			params: 2
+		}),
+		new web3._extend.Method({
+			name: 'getMinerList',
+			call: 'dbft_getMinerList',
+			params: 0
+		}),
+		new web3._extend.Method({
+			name: 'clearVote',
+			call: 'dbft_clearVote',
+			params: 0
+		}),
+		new web3._extend.Method({
+			name: 'checkVote',
+			call: 'dbft_checkVote',
+			params: 0
+		}),
+		new web3._extend.Method({
+			name: 'setByzantine',
+			call: 'dbft_setByzantine',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'getByzantine',
+			call: 'dbft_getByzantine',
+			params: 0
+		}),
+		new web3._extend.Method({
+			name: 'test',
+			call: 'dbft_test',
+			params: 0
 		}),
 	]
 });

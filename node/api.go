@@ -217,7 +217,7 @@ func (api *PrivateAdminAPI) StartWS(host *string, port *int, allowedOrigins *str
 	return true, nil
 }
 
-// StopWS terminates an already running websocket RPC API endpoint.
+// StopRPC terminates an already running websocket RPC API endpoint.
 func (api *PrivateAdminAPI) StopWS() (bool, error) {
 	api.node.lock.Lock()
 	defer api.node.lock.Unlock()
@@ -338,21 +338,6 @@ func (api *PublicDebugAPI) Metrics(raw bool) (map[string]interface{}, error) {
 					},
 				}
 
-			case metrics.ResettingTimer:
-				t := metric.Snapshot()
-				ps := t.Percentiles([]float64{5, 20, 50, 80, 95})
-				root[name] = map[string]interface{}{
-					"Measurements": len(t.Values()),
-					"Mean":         t.Mean(),
-					"Percentiles": map[string]interface{}{
-						"5":  ps[0],
-						"20": ps[1],
-						"50": ps[2],
-						"80": ps[3],
-						"95": ps[4],
-					},
-				}
-
 			default:
 				root[name] = "Unknown metric type"
 			}
@@ -388,21 +373,6 @@ func (api *PublicDebugAPI) Metrics(raw bool) (map[string]interface{}, error) {
 					},
 				}
 
-			case metrics.ResettingTimer:
-				t := metric.Snapshot()
-				ps := t.Percentiles([]float64{5, 20, 50, 80, 95})
-				root[name] = map[string]interface{}{
-					"Measurements": len(t.Values()),
-					"Mean":         time.Duration(t.Mean()).String(),
-					"Percentiles": map[string]interface{}{
-						"5":  time.Duration(ps[0]).String(),
-						"20": time.Duration(ps[1]).String(),
-						"50": time.Duration(ps[2]).String(),
-						"80": time.Duration(ps[3]).String(),
-						"95": time.Duration(ps[4]).String(),
-					},
-				}
-
 			default:
 				root[name] = "Unknown metric type"
 			}
@@ -431,4 +401,3 @@ func (s *PublicWeb3API) ClientVersion() string {
 func (s *PublicWeb3API) Sha3(input hexutil.Bytes) hexutil.Bytes {
 	return crypto.Keccak256(input)
 }
-

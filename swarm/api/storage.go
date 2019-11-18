@@ -16,11 +16,7 @@
 
 package api
 
-import (
-	"path"
-
-	"github.com/ethereum/go-ethereum/swarm/storage"
-)
+import "path"
 
 type Response struct {
 	MimeType string
@@ -34,10 +30,10 @@ type Response struct {
 //
 // DEPRECATED: Use the HTTP API instead
 type Storage struct {
-	api *API
+	api *Api
 }
 
-func NewStorage(api *API) *Storage {
+func NewStorage(api *Api) *Storage {
 	return &Storage{api}
 }
 
@@ -45,8 +41,12 @@ func NewStorage(api *API) *Storage {
 // its content type
 //
 // DEPRECATED: Use the HTTP API instead
-func (s *Storage) Put(content, contentType string, toEncrypt bool) (storage.Address, func(), error) {
-	return s.api.Put(content, contentType, toEncrypt)
+func (self *Storage) Put(content, contentType string) (string, error) {
+	key, err := self.api.Put(content, contentType)
+	if err != nil {
+		return "", err
+	}
+	return key.String(), err
 }
 
 // Get retrieves the content from bzzpath and reads the response in full
@@ -57,16 +57,16 @@ func (s *Storage) Put(content, contentType string, toEncrypt bool) (storage.Addr
 // size is resp.Size
 //
 // DEPRECATED: Use the HTTP API instead
-func (s *Storage) Get(bzzpath string) (*Response, error) {
+func (self *Storage) Get(bzzpath string) (*Response, error) {
 	uri, err := Parse(path.Join("bzz:/", bzzpath))
 	if err != nil {
 		return nil, err
 	}
-	addr, err := s.api.Resolve(uri)
+	key, err := self.api.Resolve(uri)
 	if err != nil {
 		return nil, err
 	}
-	reader, mimeType, status, _, err := s.api.Get(addr, uri.Path)
+	reader, mimeType, status, err := self.api.Get(key, uri.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -87,18 +87,18 @@ func (s *Storage) Get(bzzpath string) (*Response, error) {
 // and merge on  to it. creating an entry w conentType (mime)
 //
 // DEPRECATED: Use the HTTP API instead
-func (s *Storage) Modify(rootHash, path, contentHash, contentType string) (newRootHash string, err error) {
+func (self *Storage) Modify(rootHash, path, contentHash, contentType string) (newRootHash string, err error) {
 	uri, err := Parse("bzz:/" + rootHash)
 	if err != nil {
 		return "", err
 	}
-	addr, err := s.api.Resolve(uri)
+	key, err := self.api.Resolve(uri)
 	if err != nil {
 		return "", err
 	}
-	addr, err = s.api.Modify(addr, path, contentHash, contentType)
+	key, err = self.api.Modify(key, path, contentHash, contentType)
 	if err != nil {
 		return "", err
 	}
-	return addr.Hex(), nil
+	return key.String(), nil
 }

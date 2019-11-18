@@ -83,7 +83,6 @@ type TrieRequest struct {
 	Id    *TrieID
 	Key   []byte
 	Proof *NodeSet
-	WantLock    bool
 }
 
 // StoreResult stores the retrieved data in local database
@@ -142,6 +141,7 @@ type ChtRequest struct {
 
 // StoreResult stores the retrieved data in local database
 func (req *ChtRequest) StoreResult(db ethdb.Database) {
+
 	hash, num := req.Header.Hash(), req.Header.Number.Uint64()
 
 	rawdb.WriteHeader(db, req.Header)
@@ -170,4 +170,17 @@ func (req *BloomRequest) StoreResult(db ethdb.Database) {
 		// bit vector again from the network.
 		rawdb.WriteBloomBits(db, req.BitIdx, sectionIdx, sectionHead, req.BloomBits[i])
 	}
+}
+
+type GroupSigRequest struct {
+	OdrRequest
+	Hash     common.Hash
+	Number   uint64
+	GroupSig types.GroupSignatures
+	Header   *types.Header
+}
+
+// StoreResult stores the retrieved data in local database
+func (req *GroupSigRequest) StoreResult(db ethdb.Database) {
+	// Do nothing
 }

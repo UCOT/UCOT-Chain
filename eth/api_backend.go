@@ -43,7 +43,8 @@ type EthAPIBackend struct {
 	gpo *gasprice.Oracle
 }
 
-// ChainConfig returns the active chain configuration.
+// func (b *EthAPIBackend) InstanceDbDataDir() string { return b.eth.InstanceDbDataDir() }
+
 func (b *EthAPIBackend) ChainConfig() *params.ChainConfig {
 	return b.eth.chainConfig
 }
@@ -189,8 +190,8 @@ func (b *EthAPIBackend) TxPoolContent() (map[common.Address]types.Transactions, 
 	return b.eth.TxPool().Content()
 }
 
-func (b *EthAPIBackend) SubscribeNewTxsEvent(ch chan<- core.NewTxsEvent) event.Subscription {
-	return b.eth.TxPool().SubscribeNewTxsEvent(ch)
+func (b *EthAPIBackend) SubscribeTxPreEvent(ch chan<- core.TxPreEvent) event.Subscription {
+	return b.eth.TxPool().SubscribeTxPreEvent(ch)
 }
 
 func (b *EthAPIBackend) Downloader() *downloader.Downloader {

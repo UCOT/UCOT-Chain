@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// *** denotes the UCOT dedicated code
-
 package types
 
 import (
@@ -31,7 +29,7 @@ import (
 
 var (
 	ErrInvalidChainId = errors.New("invalid chain id for signer")
-	ErrInvalidTx = errors.New("Homestead Tx is not allowed") // ***
+	ErrInvalidTx      = errors.New("does not support homestead format, please add chainID")
 )
 
 // sigCache is used to cache the derived sender and contains
@@ -46,7 +44,7 @@ func MakeSigner(config *params.ChainConfig, blockNumber *big.Int) Signer {
 	var signer Signer
 	switch {
 	case config.IsEIP155(blockNumber):
-		signer = NewEIP155Signer(config.ChainID)
+		signer = NewEIP155Signer(config.ChainId)
 	case config.IsHomestead(blockNumber):
 		signer = HomesteadSigner{}
 	default:
@@ -130,7 +128,7 @@ var big8 = big.NewInt(8)
 func (s EIP155Signer) Sender(tx *Transaction) (common.Address, error) {
 	if !tx.Protected() {
 		// return HomesteadSigner{}.Sender(tx)
-		return common.Address{}, ErrInvalidTx // ***
+		return common.Address{}, ErrInvalidTx
 	}
 	if tx.ChainId().Cmp(s.chainId) != 0 {
 		return common.Address{}, ErrInvalidChainId
@@ -147,11 +145,11 @@ func (s EIP155Signer) SignatureValues(tx *Transaction, sig []byte) (R, S, V *big
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if s.chainId.Sign() != 0 { // -1 if x < 0; 0 if x == 0; +1 if x > 0
-		V = big.NewInt(int64(sig[64] + 35)) // v = 35/36
+	if s.chainId.Sign() != 0 {
+		V = big.NewInt(int64(sig[64] + 35))
 		V.Add(V, s.chainIdMul)
 	}
-	return R, S, V, nil // v = 27/28
+	return R, S, V, nil
 }
 
 // Hash returns the hash to be signed by the sender.

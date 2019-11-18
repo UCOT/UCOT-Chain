@@ -162,10 +162,22 @@ func (n *Node) Start() error {
 	if n.serverConfig.NodeDatabase == "" {
 		n.serverConfig.NodeDatabase = n.config.NodeDB()
 	}
-	running := &p2p.Server{Config: n.serverConfig}
+	if n.serverConfig.AddressNodeMapping == nil {
+		n.serverConfig.AddressNodeMapping = n.config.AddrNodeMapping()
+	}
+	// running := &p2p.Server{
+	// 	Config: n.serverConfig,
+	// 	EventMux:    n.eventmux, // p2p server needs event process.
+	// }
+	running := &p2p.Server{ Config: n.serverConfig }
 	n.log.Info("Starting peer-to-peer node", "instance", n.serverConfig.Name)
 
+	// path := filepath.Join(n.serverConfig.NodeDatabase[:len(n.serverConfig.NodeDatabase)-len("/nodes")], "/conf.txt")
+	// ip, _ := p2p.ReadConf(path, "default", "databaseIP")
+	// log.Info("check dir", "dir", path, "ip", ip)
+
 	// Otherwise copy and specialize the P2P configuration
+	n.config.P2P.AddressNodeMapping = n.serverConfig.AddressNodeMapping
 	services := make(map[reflect.Type]Service)
 	for _, constructor := range n.serviceFuncs {
 		// Create a new context for the particular service
@@ -576,6 +588,10 @@ func (n *Node) OpenDatabase(name string, cache, handles int) (ethdb.Database, er
 // ResolvePath returns the absolute path of a resource in the instance directory.
 func (n *Node) ResolvePath(x string) string {
 	return n.config.resolvePath(x)
+}
+
+func (n *Node) AssignPassPhrase(passwd string) {
+	n.config.PassPhrase = passwd
 }
 
 // apis returns the collection of RPC descriptors this node offers.

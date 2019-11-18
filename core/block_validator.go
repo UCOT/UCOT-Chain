@@ -14,21 +14,22 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// *** denotes the UCOT dedicated code
-
 package core
 
 import (
 	"fmt"
-	"bytes"
-	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/log"
+	// "github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/consensus/dbft"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/crypto/sha3"
+	"github.com/ethereum/go-ethereum/log"	
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // BlockValidator is responsible for validating block headers, uncles and
@@ -76,6 +77,37 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 	if hash := types.DeriveSha(block.Transactions()); hash != header.TxHash {
 		return fmt.Errorf("transaction root hash mismatch: have %x, want %x", hash, header.TxHash)
 	}
+
+	if d, ok := v.engine.(*dbft.Dbft); ok {
+		addrlist := v.bc.GetLastVote(block.NumberU64())
+		var sigCount int
+		checkReplica := make(map[uint64]int64)
+		for _, sig := range block.GroupSignatures() {
+			addr, err := PubKeyrecover(dbft.EliminateSigningField(header), sig.Sig)
+			if err != nil {
+				log.Error("Could not recover pubkey of signer", "err", err, "len", len(sig.Sig))
+				return fmt.Errorf("Could not recover pubkey of signer")
+			}
+			if addr != addrlist[int(sig.IIndex)] {
+				log.Error("Group Signature not from a miner", "addr", addr, "iIndex", sig.IIndex, "sig", sig.Sig)
+				return fmt.Errorf("Group signature not from a miner.")
+			}
+			checkReplica[sig.IIndex] += 1
+			sigCount += 1
+		}
+		// This logic can be simplified with a slice.
+		for _, count := range checkReplica {
+			if count != 1 {
+				return fmt.Errorf("Replicated signatures exist.")
+			}			
+		}
+
+		required := d.RequiredNodes(uint64(len(addrlist))) - 1 // We do not require the speaker signature
+		if (sigCount < required) {
+			log.Error("Not enough signers", "sigCount", sigCount, "required", d.RequiredNodes(uint64(len(addrlist))))
+			return fmt.Errorf("Not enough signers to pass the groupSig validation")
+		}
+	}
 	return nil
 }
 
@@ -103,67 +135,6 @@ func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *stat
 	// an error if they don't match.
 	if root := statedb.IntermediateRoot(v.config.IsEIP158(header.Number)); header.Root != root {
 		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", header.Root, root)
-	}
-	return nil
-}
-
-// ValidatePastCoinAge validates the accumulated balance of a certain account for the last N blocks,
-// starting from block.Num-5. If NoValidateCoinAge is true, skip this validation, used by fast sync.
-func (v *BlockValidator) ValidatePastCoinAge(chain types.Blocks, index int, block *types.Block) error {
-	if block.NoValidateCoinAge {
-		return nil
-	}
-	var (
-		coinAge = new(big.Int)
-		ancestors_pos = make([]*types.Header, 0, CoinAgeWindow)
-	    grandParents *types.Block // current-5
-	    header = block.Header()
-	)
-	if index < MiningLogAtDepth {
-		if chain[index].NumberU64() < MiningLogAtDepth {
-			grandParents = v.bc.GetBlockByNumber(0)
-		} else {
-			grandParents = v.bc.GetBlockByNumber(chain[index].NumberU64()-MiningLogAtDepth)
-		}
-		ancestors_pos = append(ancestors_pos, grandParents.Header())
-	} else {
-		grandParents = chain[index-MiningLogAtDepth]
-	}
-	for i := index-MiningLogAtDepth; len(ancestors_pos) < CoinAgeWindow && i >= 0; grandParents = chain[i] {
-		ancestors_pos = append(ancestors_pos, grandParents.Header())
-		i--
-		if i < 0 {
-			break
-		}
-	}
-	if len(ancestors_pos) < CoinAgeWindow && grandParents.NumberU64() > 0 { // retrieve headers from database if the size is insufficient
-		parent := v.bc.GetHeader(grandParents.ParentHash(), grandParents.NumberU64()-1)
-		for ; len(ancestors_pos) < CoinAgeWindow && parent.Number.Uint64() >= 0; parent = v.bc.GetHeader(parent.ParentHash, parent.Number.Uint64()-1) {
-			ancestors_pos = append(ancestors_pos, parent)
-			if parent.Number.Uint64() == 0 {
-				break
-			}
-		}
-	}
-	// log.Trace("check ancestors_pos","ancestors_pos",len(ancestors_pos))
-	for _, ancestor := range ancestors_pos {
-		state, err := state.New(ancestor.Root, v.bc.stateCache)
-		if err != nil {
-			log.Error("Can't not find the state", "checking",  header.Number.Uint64(), "number", ancestor.Number.Uint64(), "root", common.ToHex(ancestor.Root[:]))
-			return err
-		}
-		coinAge.Add(coinAge, v.bc.GetPastBalance(state, header))
-	}
-	if !bytes.Equal(coinAge.Bytes(), header.CoinAge) {
-		var count int
-		for _, ancestor := range ancestors_pos {
-			log.Warn("check the number when err", "height", ancestor.Number.Uint64())
-			count += 1 
-			if count == 5 {
-				break
-			}
-		}
-		return fmt.Errorf("Address: %x, Invalid Past CoinAge (coinAge: %v header.coinAge: %v)", header.Coinbase, coinAge, new(big.Int).SetBytes(header.CoinAge))
 	}
 	return nil
 }
@@ -197,4 +168,57 @@ func CalcGasLimit(parent *types.Block) uint64 {
 		}
 	}
 	return limit
+}
+
+//dbft ***
+// func EliminateSigningField(header *types.Header) *types.Header {
+// 	unsignedHeader := types.CopyHeader(header)
+
+// 	unsignedHeader.Extra = header.Extra[:32]
+// 	unsignedHeader.Extra = append(unsignedHeader.Extra, make([]byte, 65)...)
+
+// 	//unsignedHeader.Extra = header.Extra[:len(header.Extra)-65]
+// 	unsignedHeader.MixDigest = types.EmptySigHash
+// 	return unsignedHeader
+// }
+
+func FixedGasLimitForDBFT() uint64 {
+	return params.GenesisGasLimit
+}
+
+func sigHash(header *types.Header) (hash common.Hash) {
+	hasher := sha3.NewKeccak256()
+	//fmt.Println("Extra length: ", len(header.Extra), "Check sighash: ", common.ToHex(header.Extra))
+	rlp.Encode(hasher, []interface{}{
+		header.ParentHash,
+		header.UncleHash,
+		header.Coinbase,
+		header.Root,
+		header.TxHash,
+		header.ReceiptHash,
+		header.Bloom,
+		header.Difficulty,
+		header.Number,
+		header.GasLimit,
+		header.GasUsed,
+		header.Time,
+		//header.Extra,
+		header.Extra[:len(header.Extra)-types.SealLength],
+		//header.MixDigest,
+		header.Nonce,
+	})
+	hasher.Sum(hash[:0])
+	return hash
+}
+
+func PubKeyrecover(header *types.Header, sig []byte) (common.Address, error) {
+	// Recover the public key and the Ethereum address
+	pubkey, err := crypto.Ecrecover(sigHash(header).Bytes(), sig)
+	if err != nil {
+		return common.Address{}, err
+	}
+	var signer common.Address
+	copy(signer[:], crypto.Keccak256(pubkey[1:])[12:])
+
+	return signer, nil
 }
