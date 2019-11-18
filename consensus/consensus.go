@@ -23,9 +23,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/ethereum/go-ethereum/ethdb"
 )
 
 // ChainReader defines a small collection of methods needed to access the local
@@ -49,18 +50,16 @@ type ChainReader interface {
 	// GetBlock retrieves a block from the database by hash and number.
 	GetBlock(hash common.Hash, number uint64) *types.Block
 
-	// UCOT Token chain
-	// GetPastBalance retrieves the balance of a coinbase at (h-1).
-	GetPastBalance(parent_state *state.StateDB, header *types.Header) *big.Int
-
+	// StateAt retrieves the state with respect to a certain root hash.
 	StateAt(root common.Hash) (*state.StateDB, error)
+	// Validator returns the current validator.
+	ValidatorDBFT() Validator
+	// Processor returns the current processor.
+	ProcessorDBFT() Processor
 
-	GetRecentCoinbase(header *types.Header, ancestors_pos []*types.Header, uncle bool) uint64
+	GetGroupSigRLP(hash common.Hash) (rlp.RawValue, error)
 
-	// GetCoinAge(address common.Address, ancestors_pos []*types.Header) float64
-	GetCoinAge(header *types.Header) float64
-
-	GetChainDb() ethdb.Database
+	GetLastVote(number ...uint64) []common.Address
 }
 
 // Engine is an algorithm agnostic consensus engine.
@@ -87,7 +86,7 @@ type Engine interface {
 
 	// VerifySeal checks whether the crypto seal on a header is valid according to
 	// the consensus rules of the given engine.
-	VerifySeal(chain ChainReader, header *types.Header, ancestors_pos []*types.Header, uncle bool) error
+	VerifySeal(chain ChainReader, header *types.Header) error
 
 	// Prepare initializes the consensus fields of a block header according to the
 	// rules of a particular engine. The changes are executed inline.
@@ -98,7 +97,7 @@ type Engine interface {
 	// Note: The block header and state database might be updated to reflect any
 	// consensus rules that happen at finalization (e.g. block rewards).
 	Finalize(chain ChainReader, header *types.Header, state *state.StateDB, txs []*types.Transaction,
-		uncles []*types.Header, receipts []*types.Receipt, noValidate bool) (*types.Block, error)
+		uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error)
 
 	// Seal generates a new block for the given input block with the local miner's
 	// seal place on top.
@@ -110,6 +109,9 @@ type Engine interface {
 
 	// APIs returns the RPC APIs this consensus engine provides.
 	APIs(chain ChainReader) []rpc.API
+
+	// GetConsensusConfig returns the config of current consensus protocol.
+	GetConsensusConfig() params.ConsensusConfig
 }
 
 // PoW is a consensus engine based on proof-of-work.
@@ -118,4 +120,24 @@ type PoW interface {
 
 	// Hashrate returns the current mining hashrate of a PoW consensus engine.
 	Hashrate() float64
+}
+
+// Validator is an interface which defines the standard for block validation. It
+// is only responsible for validating block contents, as the header validation is
+// done by the specific consensus engines.
+//
+type Validator interface {
+	// ValidateState validates the given statedb and optionally the receipts and
+	// gas used.
+	ValidateState(block, parent *types.Block, state *state.StateDB, receipts types.Receipts, usedGas uint64) error
+}
+
+// Processor is an interface for processing blocks using a given initial state.
+//
+// Process takes the block to be processed and the statedb upon which the
+// initial state is based. It should return the receipts generated, amount
+// of gas used in the process and return an error if any of the internal rules
+// failed.
+type Processor interface {
+	Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error)
 }

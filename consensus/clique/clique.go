@@ -383,7 +383,7 @@ func (c *Clique) snapshot(chain consensus.ChainReader, number uint64, hash commo
 		// If an on-disk checkpoint snapshot can be found, use that
 		if number%checkpointInterval == 0 {
 			if s, err := loadSnapshot(c.config, c.signatures, c.db, hash); err == nil {
-				log.Trace("Loaded voting snapshot from disk", "number", number, "hash", hash)
+				log.Trace("Loaded voting snapshot form disk", "number", number, "hash", hash)
 				snap = s
 				break
 			}
@@ -455,7 +455,7 @@ func (c *Clique) VerifyUncles(chain consensus.ChainReader, block *types.Block) e
 
 // VerifySeal implements consensus.Engine, checking whether the signature contained
 // in the header satisfies the consensus protocol requirements.
-func (c *Clique) VerifySeal(chain consensus.ChainReader, header *types.Header, ancestors_pos []*types.Header, uncle bool) error {
+func (c *Clique) VerifySeal(chain consensus.ChainReader, header *types.Header) error {
 	return c.verifySeal(chain, header, nil)
 }
 
@@ -569,13 +569,13 @@ func (c *Clique) Prepare(chain consensus.ChainReader, header *types.Header) erro
 
 // Finalize implements consensus.Engine, ensuring no uncles are set, nor block
 // rewards given, and returns the final block.
-func (c *Clique) Finalize(chain consensus.ChainReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, noValidate bool) (*types.Block, error) {
+func (c *Clique) Finalize(chain consensus.ChainReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
 	// No block rewards in PoA, so the state remains as is and uncles are dropped
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 	header.UncleHash = types.CalcUncleHash(nil)
 
 	// Assemble and return the final block for sealing
-	return types.NewBlock(header, txs, nil, receipts), nil
+	return types.NewBlock(header, txs, nil, receipts, nil), nil // add groupSig
 }
 
 // Authorize injects a private key into the consensus engine to mint new blocks
@@ -671,6 +671,10 @@ func CalcDifficulty(snap *Snapshot, signer common.Address) *big.Int {
 		return new(big.Int).Set(diffInTurn)
 	}
 	return new(big.Int).Set(diffNoTurn)
+}
+
+func (c *Clique) GetConsensusConfig() params.ConsensusConfig { //***
+	return c.config
 }
 
 // APIs implements consensus.Engine, returning the user facing RPC API to allow

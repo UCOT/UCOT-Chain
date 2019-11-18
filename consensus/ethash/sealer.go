@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// *** denotes the UCOT dedicated code
-
 package ethash
 
 import (
@@ -35,29 +33,6 @@ import (
 // Seal implements consensus.Engine, attempting to find a nonce that satisfies
 // the block's difficulty requirements.
 func (ethash *Ethash) Seal(chain consensus.ChainReader, block *types.Block, stop <-chan struct{}) (*types.Block, error) {
-	// Calculate delta h
-	var delta_h float64
-	recent := chain.GetRecentCoinbase(block.Header(), nil, false)
-	Dh := int64(block.NumberU64()-recent)
-	if recent < math.MaxUint64 && recent < block.NumberU64() {
-		// delta_h = math.Log10(float64(block.NumberU64()-recent))
-		delta_h = math.Pow(float64(Dh-128), 3) / 1024000 + 2
-		log.Info("check in seal, come here","Dh",Dh,"delta_h",delta_h,"recent",recent,"coinbase",common.ToHex(block.Header().Coinbase[:8]))
-		// if block.NumberU64()-recent <= core.MiningLogAtDepth {
-		// 	//log.Info("check in seal, come here","delta_h",delta_h,"recent",recent,"coinbase",common.ToHex(block.Header().Coinbase[:8]))
-		// 	delta_h = maths.Pow(float64(512+5-128), 3) / 1024000 + 2 
-		// }
-	} else {
-		log.Info("check in seal, or here?","delta_h",delta_h,"recent",recent,"coinbase",common.ToHex(block.Header().Coinbase[:8]))
-		// delta_h = math.Log10(2)
-		delta_h = math.Pow(float64(512+5-128), 3) / 1024000 + 2 
-	}
-	log.Info("check delta_h in seal", "delta_h", delta_h,"number",block.NumberU64(),"recent",recent, "coinbase",common.ToHex(block.Header().Coinbase[:8]))
-
-	// Calculate CoinAge
-	age := chain.GetCoinAge(block.Header())
-	log.Trace("check age in seal","age",age,"number",block.NumberU64(),"coinbase",common.ToHex(block.Header().Coinbase[:8]))
-
 	// If we're running a fake PoW, simply return a 0 nonce immediately
 	if ethash.config.PowMode == ModeFake || ethash.config.PowMode == ModeFullFake {
 		header := block.Header()
@@ -94,7 +69,7 @@ func (ethash *Ethash) Seal(chain consensus.ChainReader, block *types.Block, stop
 		pend.Add(1)
 		go func(id int, nonce uint64) {
 			defer pend.Done()
-			ethash.mine(delta_h, age, block, id, nonce, abort, found)
+			ethash.mine(block, id, nonce, abort, found)
 		}(i, uint64(ethash.rand.Int63()))
 	}
 	// Wait until sealing is terminated or a nonce is found
@@ -119,7 +94,7 @@ func (ethash *Ethash) Seal(chain consensus.ChainReader, block *types.Block, stop
 
 // mine is the actual proof-of-work miner that searches for a nonce starting from
 // seed that results in correct final block difficulty.
-func (ethash *Ethash) mine(delta_h float64, age float64, block *types.Block, id int, seed uint64, abort chan struct{}, found chan *types.Block) {
+func (ethash *Ethash) mine(block *types.Block, id int, seed uint64, abort chan struct{}, found chan *types.Block) {
 	// Extract some data from the header
 	var (
 		header  = block.Header()
@@ -128,28 +103,19 @@ func (ethash *Ethash) mine(delta_h float64, age float64, block *types.Block, id 
 		number  = header.Number.Uint64()
 		dataset = ethash.dataset(number)
 	)
-	// UCOT Hybrid pos with pow, Hash(B) <= Age(A)*LOG2(delta_h)*M/D
-	var (
-		dh_big = new(big.Float).SetFloat64(delta_h)
-		age_big = new(big.Float).SetFloat64(age)
-		targetPoS = new(big.Float).SetInt(target)
-	)
-	targetPoS.Mul(targetPoS, dh_big)
-	targetPoS.Mul(targetPoS, age_big)
-	// log.Info("check", "coinbase",block.Coinbase(), "number",block.NumberU64(),"age",age_big,"dh_big",dh_big,"target",targetPoS) 
 	// Start generating random nonces until we abort or find a good one
 	var (
 		attempts = int64(0)
 		nonce    = seed
 	)
 	logger := log.New("miner", id)
-	//logger.Trace("Started ethash search for new nonces", "seed", seed)
+	logger.Trace("Started ethash search for new nonces", "seed", seed)
 search:
 	for {
 		select {
 		case <-abort:
 			// Mining terminated, update stats and abort
-			//logger.Trace("Ethash nonce search aborted", "attempts", nonce-seed)
+			logger.Trace("Ethash nonce search aborted", "attempts", nonce-seed)
 			ethash.hashrate.Mark(attempts)
 			break search
 
@@ -162,11 +128,8 @@ search:
 			}
 			// Compute the PoW value of this nonce
 			digest, result := hashimotoFull(dataset.dataset, hash, nonce)
-			// We manage to apply POS comparison ***
-			if new(big.Float).SetInt(new(big.Int).SetBytes(result)).Cmp(targetPoS) <= 0 { 
-			// if new(big.Int).SetBytes(result).Cmp(target) <= 0 {
+			if new(big.Int).SetBytes(result).Cmp(target) <= 0 {
 				// Correct nonce found, create a new header with it
-				log.Trace("check pow in seal", "number",header.Number,"ours", new(big.Float).SetInt(new(big.Int).SetBytes(result)), "header", targetPoS, "D", header.Difficulty, "dh_big", dh_big,"age_big",age_big)
 				header = types.CopyHeader(header)
 				header.Nonce = types.EncodeNonce(nonce)
 				header.MixDigest = common.BytesToHash(digest)

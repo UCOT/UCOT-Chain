@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// *** denotes the UCOT dedicated code
-
 package ethash
 
 import (
@@ -34,12 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	set "gopkg.in/fatih/set.v0"
-
-	// UCOT dedicated
-	maths "math"
-	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/core/rawdb"
-	"github.com/ethereum/go-ethereum/core"
 )
 
 // Ethash proof-of-work protocol constants.
@@ -48,9 +40,6 @@ var (
 	ByzantiumBlockReward   *big.Int = big.NewInt(3e+18) // Block reward in wei for successfully mining a block upward from Byzantium
 	maxUncles                       = 2                 // Maximum number of uncles allowed in a single block
 	allowedFutureBlockTime          = 15 * time.Second  // Max time from current time allowed for blocks, before they're considered future blocks
-
-	// UCOT dedicated
-	UCTBlockReward         *big.Int = big.NewInt(1e+18) // Block reward in wei for successfully mining a block in UCT-Token
 )
 
 // Various error messages to mark blocks invalid. These should be private to
@@ -92,7 +81,7 @@ func (ethash *Ethash) VerifyHeader(chain consensus.ChainReader, header *types.He
 		return consensus.ErrUnknownAncestor
 	}
 	// Sanity checks passed, do a proper verification
-	return ethash.verifyHeader(chain, header, parent, false, seal, nil) 
+	return ethash.verifyHeader(chain, header, parent, false, seal)
 }
 
 // VerifyHeaders is similar to VerifyHeader, but verifies a batch of headers
@@ -173,38 +162,7 @@ func (ethash *Ethash) verifyHeaderWorker(chain consensus.ChainReader, headers []
 	if chain.GetHeader(headers[index].Hash(), headers[index].Number.Uint64()) != nil {
 		return nil // known block
 	}
-	// Slice the past 512 ancestor for CoinAge and Delta_h
-	var (
-		ancestors_pos = make([]*types.Header, 0, core.CoinbaseSearchingLimit)
-	    grandParents *types.Header
-	)
-	if index < core.MiningLogAtDepth {
-		if headers[index].Number.Uint64() < core.MiningLogAtDepth {
-			grandParents = chain.GetHeaderByNumber(0)
-		} else {
-			grandParents = chain.GetHeaderByNumber(headers[index].Number.Uint64()-core.MiningLogAtDepth)
-		}
-		ancestors_pos = append(ancestors_pos, grandParents)
-	} else {
-		grandParents = headers[index-core.MiningLogAtDepth]
-	}
-	for i := index-core.MiningLogAtDepth; len(ancestors_pos) < core.CoinbaseSearchingLimit && i >= 0; grandParents = headers[i] {
-		ancestors_pos = append(ancestors_pos, grandParents)
-		i--
-		if i < 0 {
-			break
-		}
-	}
-	if len(ancestors_pos) < core.CoinbaseSearchingLimit && grandParents.Number.Uint64() > 0 { // retrieve headers from database if the size is insufficient
-		current := chain.GetHeader(grandParents.ParentHash, grandParents.Number.Uint64()-1)
-		for ; len(ancestors_pos) < core.CoinbaseSearchingLimit && current.Number.Uint64() >= 0; current = chain.GetHeader(current.ParentHash, current.Number.Uint64()-1) {
-			ancestors_pos = append(ancestors_pos, current)
-			if current.Number.Uint64() == 0 {
-				break
-			}
-		}
-	}
-	return ethash.verifyHeader(chain, headers[index], parent, false, seals[index], ancestors_pos)
+	return ethash.verifyHeader(chain, headers[index], parent, false, seals[index])
 }
 
 // VerifyUncles verifies that the given block's uncles conform to the consensus
@@ -222,8 +180,7 @@ func (ethash *Ethash) VerifyUncles(chain consensus.ChainReader, block *types.Blo
 	uncles, ancestors := set.New(), make(map[common.Hash]*types.Header)
 
 	number, parent := block.NumberU64()-1, block.ParentHash()
-
-	for i := 0; i < 7; i++ { // Within depth of 7
+	for i := 0; i < 7; i++ {
 		ancestor := chain.GetBlock(parent, number)
 		if ancestor == nil {
 			break
@@ -253,7 +210,7 @@ func (ethash *Ethash) VerifyUncles(chain consensus.ChainReader, block *types.Blo
 		if ancestors[uncle.ParentHash] == nil || uncle.ParentHash == block.ParentHash() {
 			return errDanglingUncle
 		}
-		if err := ethash.verifyHeader(chain, uncle, ancestors[uncle.ParentHash], true, true, nil); err != nil {
+		if err := ethash.verifyHeader(chain, uncle, ancestors[uncle.ParentHash], true, true); err != nil {
 			return err
 		}
 	}
@@ -263,20 +220,11 @@ func (ethash *Ethash) VerifyUncles(chain consensus.ChainReader, block *types.Blo
 // verifyHeader checks whether a header conforms to the consensus rules of the
 // stock Ethereum ethash engine.
 // See YP section 4.3.4. "Block Header Validity"
-func (ethash *Ethash) verifyHeader(chain consensus.ChainReader, header, parent *types.Header, uncle bool, seal bool, ancestors_pos []*types.Header) error {
+func (ethash *Ethash) verifyHeader(chain consensus.ChainReader, header, parent *types.Header, uncle bool, seal bool) error {
 	// Ensure that the header's extra-data section is of a reasonable size
 	if uint64(len(header.Extra)) > params.MaximumExtraDataSize {
 		return fmt.Errorf("extra-data too long: %d > %d", len(header.Extra), params.MaximumExtraDataSize)
 	}
-	// Ensure that the header's balance section is of a reasonable size
-	if uint64(len(header.CoinAge)) > params.MaximumBalanceSize {
-		return fmt.Errorf("coin age too long: %d > %d", len(header.CoinAge), params.MaximumBalanceSize)
-	}
-	// Ensure that the header's balance section is of a reasonable size
-	if new(big.Int).SetBytes(header.CoinMined).Cmp(params.ReleaseTotal) > 0 {
-		return fmt.Errorf("invalid coin-mined")
-	}
-
 	// Verify the header's timestamp
 	if uncle {
 		if header.Time.Cmp(math.MaxBig256) > 0 {
@@ -322,7 +270,7 @@ func (ethash *Ethash) verifyHeader(chain consensus.ChainReader, header, parent *
 	}
 	// Verify the engine specific seal securing the block
 	if seal {
-		if err := ethash.VerifySeal(chain, header, ancestors_pos, uncle); err != nil {
+		if err := ethash.VerifySeal(chain, header); err != nil {
 			return err
 		}
 	}
@@ -512,7 +460,7 @@ func calcDifficultyFrontier(time uint64, parent *types.Header) *big.Int {
 
 // VerifySeal implements consensus.Engine, checking whether the given block satisfies
 // the PoW difficulty requirements.
-func (ethash *Ethash) VerifySeal(chain consensus.ChainReader, header *types.Header, ancestors_pos []*types.Header, uncle bool) error {
+func (ethash *Ethash) VerifySeal(chain consensus.ChainReader, header *types.Header) error {
 	// If we're running a fake PoW, accept any seal as valid
 	if ethash.config.PowMode == ModeFake || ethash.config.PowMode == ModeFullFake {
 		time.Sleep(ethash.fakeDelay)
@@ -523,7 +471,7 @@ func (ethash *Ethash) VerifySeal(chain consensus.ChainReader, header *types.Head
 	}
 	// If we're running a shared PoW, delegate verification to it
 	if ethash.shared != nil {
-		return ethash.shared.VerifySeal(chain, header, ancestors_pos, uncle)
+		return ethash.shared.VerifySeal(chain, header)
 	}
 	// Ensure that we have a valid difficulty for the block
 	if header.Difficulty.Sign() <= 0 {
@@ -546,49 +494,10 @@ func (ethash *Ethash) VerifySeal(chain consensus.ChainReader, header *types.Head
 		return errInvalidMixDigest
 	}
 	target := new(big.Int).Div(maxUint256, header.Difficulty)
-
-	// UCOT dedicated. UCOT Hybrid pos with pow, Hash(B) <= Age(A)*LOG2(delta_h)*M/D
-	delta_h, age := ethash.getCoinAgeAndDeltaH(chain, header, ancestors_pos, uncle)
-	var (
-		dh_big = new(big.Float).SetFloat64(delta_h)
-		age_big = new(big.Float).SetFloat64(age)
-		targetPoS = new(big.Float).SetInt(target)
-	)
-	targetPoS.Mul(targetPoS, dh_big)
-	targetPoS.Mul(targetPoS, age_big)
-	if new(big.Float).SetInt(new(big.Int).SetBytes(result)).Cmp(targetPoS) > 0 { 
-	// if new(big.Int).SetBytes(result).Cmp(target) > 0 {
-		log.Error("check pow in verify", "number",header.Number, "coinbase",common.ToHex(header.Coinbase[:8]),"ours", new(big.Float).SetInt(new(big.Int).SetBytes(result)), "header", targetPoS, "D", header.Difficulty, "dh_big", dh_big,"age_big",age_big)
+	if new(big.Int).SetBytes(result).Cmp(target) > 0 {
 		return errInvalidPoW
 	}
 	return nil
-}
-
-func (ethash *Ethash) getCoinAgeAndDeltaH(chain consensus.ChainReader, header *types.Header, ancestors_pos []*types.Header, uncle bool) (float64, float64) {
-	// Calculate delta h
-	var delta_h float64
-	log.Info("check size of ancestors_pos", "size",len(ancestors_pos))
-	recent := chain.GetRecentCoinbase(header, ancestors_pos, uncle)
-	Dh := int64(header.Number.Uint64()-recent)
-	if recent < maths.MaxUint64 && recent < header.Number.Uint64() {
-		// delta_h = maths.Log10(float64(header.Number.Uint64()-recent))
-		delta_h = maths.Pow(float64(Dh-128), 3) / 1024000 + 2
-		log.Info("check in verify, come here","Dh", Dh, "delta_h", delta_h, "recent", recent, "coinbase", common.ToHex(header.Coinbase[:8]))
-		// if header.Number.Uint64()-recent <= core.MiningLogAtDepth {
-		// 	//log.Trace("check in verify, come here","delta_h",delta_h,"recent",recent,"coinbase",common.ToHex(header.Coinbase[:8]))
-		// 	delta_h = maths.Pow(float64(512+5-128), 3) / 1024000 + 2  
-		// }
-	} else {
-		log.Info("check in verify, or here?","delta_h",delta_h,"recent",recent,"coinbase",common.ToHex(header.Coinbase[:8]))
-		// delta_h = maths.Log10(2) 
-		delta_h = maths.Pow(float64(512+5-128), 3) / 1024000 + 2 
-	}
-	log.Info("check delta_h in verify", "delta_h",delta_h, "number",header.Number.Uint64(),"recent",recent, "coinbase",common.ToHex(header.Coinbase[:8]))
-
-	// Calculate CoinAge
-	age := chain.GetCoinAge(header)
-		log.Trace("check age in verify","age",age,"number",header.Number.Uint64(),"coinbase",common.ToHex(header.Coinbase[:8]))
-	return delta_h, age
 }
 
 // Prepare implements consensus.Engine, initializing the difficulty field of a
@@ -604,20 +513,13 @@ func (ethash *Ethash) Prepare(chain consensus.ChainReader, header *types.Header)
 
 // Finalize implements consensus.Engine, accumulating the block and uncle rewards,
 // setting the final state and assembling the block.
-func (ethash *Ethash) Finalize(chain consensus.ChainReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, noValidate bool) (*types.Block, error) {
-	// Record the balance in the CoinAge field
-	pastCoinAge(chain, header)
+func (ethash *Ethash) Finalize(chain consensus.ChainReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
 	// Accumulate any block and uncle rewards and commit the final state root
-	reward_final, err := accumulateRewards(chain, chain.Config(), state, header, uncles, noValidate)
-	if err != nil {
-		return nil, err
-	}
+	accumulateRewards(chain.Config(), state, header, uncles)
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
-	header.CoinMined = reward_final.Bytes()
+
 	// Header seems complete, assemble into a block and return
-	block := types.NewBlock(header, txs, uncles, receipts)
-	rawdb.WriteTokenBalance(chain.GetChainDb(), block.HashNoNonce(), header.Number.Uint64(), reward_final) // At this point, header has not been completed yet.
-	return block, nil
+	return types.NewBlock(header, txs, uncles, receipts, nil), nil // add groupSig
 }
 
 // Some weird constants to avoid constant memory allocs for them.
@@ -629,90 +531,30 @@ var (
 // AccumulateRewards credits the coinbase of the given block with the mining
 // reward. The total reward consists of the static block reward and rewards for
 // included uncles. The coinbase of each uncle block is also rewarded.
-func accumulateRewards(chain consensus.ChainReader, config *params.ChainConfig, state *state.StateDB, header *types.Header, uncles []*types.Header, noValidate bool) (*big.Int, error) {
-	blockReward := UCTBlockReward
+func accumulateRewards(config *params.ChainConfig, state *state.StateDB, header *types.Header, uncles []*types.Header) {
+	// Select the correct block reward based on chain progression
+	blockReward := FrontierBlockReward
+	if config.IsByzantium(header.Number) {
+		blockReward = ByzantiumBlockReward
+	}
 	// Accumulate the rewards for the miner and any included uncles
 	reward := new(big.Int).Set(blockReward)
 	r := new(big.Int)
-	rewardThisRound := new(big.Int)
-	uncleReward := make(map[common.Address]*big.Int)
 	for _, uncle := range uncles {
 		r.Add(uncle.Number, big8)
 		r.Sub(r, header.Number)
 		r.Mul(r, blockReward)
 		r.Div(r, big8)
-		uncleReward[uncle.Coinbase] = r
-		// state.AddBalance(uncle.Coinbase, r)
-		rewardThisRound.Add(rewardThisRound, r)
+		state.AddBalance(uncle.Coinbase, r)
 
 		r.Div(blockReward, big32)
 		reward.Add(reward, r)
 	}
-	// state.AddBalance(header.Coinbase, reward)
-	rewardThisRound.Add(rewardThisRound, reward)
-	rewardTotal, err, normal := checkDeadLine(chain, header, rewardThisRound, noValidate)
-	if err != nil {
-		return big.NewInt(0), err
-	} else if !normal && err == nil {
-		state.AddBalance(header.Coinbase, rewardTotal)
-		return params.ReleaseTotal, nil
-	} else {
-		for uncle, r := range uncleReward {
-			state.AddBalance(uncle, r)
-		}
-		state.AddBalance(header.Coinbase, reward)
-	}
-	return rewardTotal, nil
+	state.AddBalance(header.Coinbase, reward)
 }
 
-func pastCoinAge(chain consensus.ChainReader, header *types.Header) {
-	var (
-		coinAge = new(big.Int)
-		parent *types.Header
-		count int
-	)
-	if header.Number.Uint64() < core.MiningLogAtDepth {
-		parent = chain.GetHeaderByNumber(0)
-	} else {
-		parent = chain.GetHeaderByNumber(header.Number.Uint64()-core.MiningLogAtDepth)
-	}
-	for ; header.Number.Uint64()-parent.Number.Uint64() < core.CoinAgeWindow+core.MiningLogAtDepth && parent.Number.Uint64() >= 0; parent = chain.GetHeader(parent.ParentHash, parent.Number.Uint64()-1) {
-		count += 1
-		state, _ := chain.StateAt(parent.Root)
-		coinAge.Add(coinAge, chain.GetPastBalance(state, header))
-		if parent.Number.Uint64() == 0 {
-			break
-		}
-	}
-	log.Trace("check count in pastCoinAge","count",count,"parent_num",header.Number.Uint64())
-	header.CoinAge = coinAge.Bytes()
+// GetConsensusConfig implements consensus.Engine, returning the current config of consensus protocol. Currently
+// that is empty.
+func (ethash *Ethash) GetConsensusConfig() params.ConsensusConfig {
+	return nil
 }
-
-func checkDeadLine(chain consensus.ChainReader, header *types.Header, total *big.Int, noValidate bool) (*big.Int, error, bool) {
-	if header.Number.Uint64() > 1 {
-		var released = new(big.Int)
-		if noValidate {
-			released.SetBytes(chain.GetHeader(header.ParentHash, header.Number.Uint64()-1).CoinMined)
-		} else {
-			// We use HashNoNonce because the header has not been completely when Writing.
-			released = rawdb.ReadTokenBalance(chain.GetChainDb(), chain.GetHeader(header.ParentHash, header.Number.Uint64()-1).HashNoNonce(), header.Number.Uint64()-1)
-			if released == nil {
-				log.Error("check header in checkDeadLine", "num",header.Number.Uint64()-1, "hash", chain.GetHeader(header.ParentHash, header.Number.Uint64()-1).HashNoNonce())
-				return big.NewInt(0), errors.New("Can't find the total token balance"), false
-			}
-			if parent := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1); released.Cmp(new(big.Int).SetBytes(parent.CoinMined)) != 0 {
-				log.Error("invalid header coinMined", "header_coinMined", new(big.Int).SetBytes(parent.CoinMined), "released", released)
-				return big.NewInt(0), errors.New("Invalid total token balance"), false
-			}	
-		}
-
-		extern := new(big.Int).Add(released, total)
-		if extern.Cmp(params.ReleaseTotal) > 0 {
-			return new(big.Int).Sub(params.ReleaseTotal, released), nil, false
-		}
-		return extern, nil, true
-	} else {
-		return total, nil, true
-	}
-}
-
